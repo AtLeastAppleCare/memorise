@@ -110,7 +110,7 @@ A pinned memory is always listed, first, with the start of its text (never title
 
 In **Project settings** or the panel's **What agents see** tab, shared by every clone and worktree of the project. Each switch applies at once:
 
-- **Memory for this project:** off gives new agents here no memories and no memory tools.
+- **Memory for this project:** off gives new agents here no memories and no memory tools, and Memorise reads no sessions here for suggestions, whatever the "Suggestions from sessions" switch says. Agents already running keep the tools they were given; their memory reads then ask you first.
 - **Include global memories:** off keeps your global memories away from this project's agents (list, search, and reading).
 - **Suggestions from sessions:** use the global setting, or turn suggestions from sessions on or off for this project only.
 - **Save suggestions without review:** off by default. On, new memories suggested by sessions and project files are saved without waiting for you, marked "Saved without review", and hidden after going unused like an agent's. Rewrites, archives, and clean-ups still wait for you.
@@ -126,7 +126,7 @@ Settings > Plugins > Memorise, or **Settings** in Memorise. The main level holds
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Give agents memory | on | Off keeps saved memories |
-| Read memories without asking | on | Saving or changing a memory still asks, unless the agent runs in a mode that skips approvals |
+| Read memories without asking | on | Covers only Memorise's two read tools (`memory_search`, `memory_read`), and only where Memorise gives agents its tools: not with memory off, in a project with memory off, or for other providers. Saving or changing a memory still asks, unless the agent runs in a mode that skips approvals |
 | Show Memorise in agent chats | off | A line when an agent starts (memories in its prompt), one after each turn that used them, with the totals so far, and a card when a session's suggestions are ready. Off: review suggestions in the Suggestions tab |
 | Notify when a background run finishes | off | Paseo's notifications when a session suggestion, clean-up, or project scan finishes or fails. Off: their worker agents are Paseo background agents and end quietly; a failed run shows on its status in Memorise |
 | Suggest memories from sessions | off | See below |

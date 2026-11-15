@@ -309,8 +309,10 @@ export const listTypesRpc = defineRpc({
 });
 
 // Per-repo preferences, shared by every worktree of the repo. enabled false: new agents in the repo
-// get no memory and no memory tools. includeGlobal false: the repo's agents see no global memories.
-// capture: "default" follows the host setting; "on" or "off" overrides it for this repo.
+// get no memory and no memory tools, no session in it is read for suggestions (whatever `capture`
+// says), and memory reads are not approved without asking. includeGlobal false: the repo's agents
+// see no global memories. capture: "default" follows the host setting; "on" or "off" overrides it
+// for this repo while `enabled` is true.
 // autoApprove: new memories from capture and project scans are saved without review. Changes to
 // saved memories (tidy, replace, retire) always wait for the user.
 export const repoPrefsSchema = z.object({

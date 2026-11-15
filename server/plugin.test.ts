@@ -62,7 +62,7 @@ function fakeServer(values: MemorySettings, readSettings?: () => Promise<unknown
     create: (config: Record<string, unknown>, env?: Record<string, string>) => (before.get("agent.create") as (input: unknown, context: unknown) => Promise<{ config: Record<string, any> }>)({ request: { config, ...(env ? { env } : {}) } }, { paseo }),
     call: (name: string, input: unknown) => (rpc.get(name) as (input: unknown, context: unknown) => Promise<any>)(input, { paseo }),
     workspaceCreated: (cwd: string) => (on.get("workspace.created") as (event: unknown, context: unknown) => Promise<void>)({ workspace: { id: "ws-1", projectId: "p-1", cwd, name: null, archivedAt: null } }, { paseo }),
-    permission: (request: Record<string, unknown>, cwd = "/tmp") => (on.get("agent.permission_requested") as (event: unknown, context: unknown) => Promise<void>)({ agent: { id: "agent-1", cwd }, request }, { paseo }),
+    permission: (request: Record<string, unknown>, cwd = "/tmp", provider = "claude") => (on.get("agent.permission_requested") as (event: unknown, context: unknown) => Promise<void>)({ agent: { id: "agent-1", cwd, provider }, request }, { paseo }),
   };
 }
 
@@ -155,7 +155,28 @@ describe("memorise server entry", () => {
     // A user's own server that happens to use the old, generic name is never approved.
     await fake.permission({ id: "u1", name: "mcp__memorise__delete_everything" });
     await fake.permission({ id: "u2", name: "CodexMcpElicitation", metadata: { serverName: "memorise" } });
-    expect(fake.respondToPermission.mock.calls.map(([call]) => call.requestId)).toEqual(["r1", "r2"]);
+    // Only the two read tools are approved: another tool under the read server's name is not Memorise's.
+    await fake.permission({ id: "r3", name: "mcp__paseo-memorise__memory_read" });
+    await fake.permission({ id: "f1", name: "mcp__paseo-memorise__delete_everything" });
+    await fake.permission({ id: "f2", name: "mcp__paseo-memorise__memory_read_all" });
+    expect(fake.respondToPermission.mock.calls.map(([call]) => call.requestId)).toEqual(["r1", "r2", "r3"]);
+  });
+
+  it("approves no read where Memorise gives agents no tools: memory off, the project off, or another provider", async () => {
+    const read = { id: "r1", name: "mcp__paseo-memorise__memory_read" };
+    const off = start({ ...defaults, enabled: false });
+    await off.permission(read);
+    expect(off.respondToPermission).not.toHaveBeenCalled();
+    await cleanup();
+    const fake = start();
+    await fake.permission(read, "/tmp", "gemini");
+    const cwd = await repoWithOrigin("git@github.com:acme/api.git");
+    await fake.call("memory.repo-prefs.set", { repoKey: "github.com/acme/api", prefs: { enabled: false, includeGlobal: true, capture: "default", autoApprove: false } });
+    await fake.permission(read, cwd);
+    expect(fake.respondToPermission).not.toHaveBeenCalled();
+    await fake.call("memory.repo-prefs.set", { repoKey: "github.com/acme/api", prefs: { enabled: true, includeGlobal: true, capture: "default", autoApprove: false } });
+    await fake.permission(read, cwd);
+    expect(fake.respondToPermission.mock.calls.map(([call]) => call.requestId)).toEqual(["r1"]);
   });
 
   it("asks for every read when automatic read approval is off", async () => {
