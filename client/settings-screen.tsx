@@ -109,7 +109,7 @@ export function MemorySettingsScreen({ theme }: PluginSurfaceProps) {
           />
           <SettingsSwitch
             label="Read memories without asking"
-            hint="Agents search and open memories without asking you. Saving or changing one still asks."
+            hint="Agents search and open memories without asking you, where Memorise gives them its tools. Saving or changing one still asks."
             value={settings.values.autoApproveReads}
             disabled={settings.saving}
             onValueChange={(autoApproveReads) => save({ ...settings.values, autoApproveReads })}

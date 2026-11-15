@@ -366,6 +366,17 @@ describe("capture", () => {
     expect((await proposals.list(REPO)).map((proposal) => proposal.subject)).toEqual(["local eval"]);
   });
 
+  it("reads no session in a project whose memory is off, even with session suggestions on", async () => {
+    await repoPrefs.set(REPO, { enabled: false, capture: "on" });
+    const fake = fakePaseo(conversation(5), reply);
+    capture.remember(fake.paseo);
+    expect(await capture.captureNow(agent)).toBe(0);
+    expect(fake.created).toEqual([]);
+    expect(await proposals.list(REPO)).toEqual([]);
+    await repoPrefs.set(REPO, { enabled: true, capture: "on" });
+    expect(await capture.captureNow(agent)).toBe(1);
+  });
+
   it("with auto mode on, saves captured memories and says so on the chat card", async () => {
     await repoPrefs.set(REPO, { enabled: true, includeGlobal: true, capture: "default", autoApprove: true });
     const fake = fakePaseo(conversation(5), reply);

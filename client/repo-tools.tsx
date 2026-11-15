@@ -33,7 +33,7 @@ export function RepoPrefsCard({ repoKey, styles }: { repoKey: string; styles: St
     <SettingsCard>
       <SettingsSwitch
         label="Memory for this project"
-        hint={prefs.enabled ? "New agents here get memories and the memory tools." : "New agents here get no memories and no memory tools. Saved memories are kept."}
+        hint={prefs.enabled ? "New agents here get memories and the memory tools." : "New agents here get no memories and no memory tools, and no sessions here are read for suggestions. Saved memories are kept."}
         value={prefs.enabled}
         disabled={mutation.isPending}
         onValueChange={(enabled) => change({ enabled })}
@@ -47,7 +47,7 @@ export function RepoPrefsCard({ repoKey, styles }: { repoKey: string; styles: St
       />
       <SettingsSelect
         label="Suggestions from sessions"
-        hint="Whether finished sessions here suggest memories. “Use global setting” follows Settings."
+        hint={prefs.enabled ? "Whether finished sessions here suggest memories. “Use global setting” follows Settings." : "No sessions here are read while memory for this project is off. This choice applies again once it is on."}
         value={prefs.capture}
         options={SESSION_SUGGESTIONS}
         disabled={mutation.isPending}

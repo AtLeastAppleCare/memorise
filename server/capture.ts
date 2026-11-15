@@ -320,9 +320,12 @@ export class Capture {
     return { pending, autoSaved };
   }
 
-  // A repo's own capture preference overrides the host setting.
+  // A repo's own capture preference overrides the host setting. A repo with memory off has no
+  // sessions read at all, as automatic project scans already skip it: memory off means Memorise
+  // leaves the project alone.
   private async captureOn(values: MemorySettings, repoKey: string): Promise<boolean> {
-    const { capture } = await this.deps.repoPrefs.get(repoKey);
+    const { capture, enabled } = await this.deps.repoPrefs.get(repoKey);
+    if (!enabled) return false;
     return capture === "default" ? values.captureEnabled : capture === "on";
   }
 

@@ -67,6 +67,8 @@ import { Interop } from "./interop";
 const CITATION_BUDGET_MS = 1_000;
 const PATH_MATCH_BUDGET_MS = 500;
 const BY_USER = { by: "user" as const, provider: null, branch: null, commit: null };
+// The permission requests Claude sends for the two tools of the read server (see buildReadServer).
+const READ_TOOL_REQUESTS = new Set(["memory_search", "memory_read"].map((tool) => `mcp__${READ_SERVER}__${tool}`));
 
 interface Runtime {
   root: string;
@@ -269,9 +271,20 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
     }
   });
 
+  // Whether an agent of this provider in this folder is given the memory tools now: the conditions
+  // the create hook applies. Where it is not, a tool that carries the read server's name did not
+  // come from Memorise, so the permission hook must not approve it.
+  async function givesMemoryTools(provider: string, cwd: string): Promise<boolean> {
+    if (!supportedProvider(provider) || !(await currentSettings()).enabled) return false;
+    const { repoPrefs, keys, mcpProblem } = await runtime;
+    if (mcpProblem !== null) return false;
+    const repoKey = await keys.keyOf(cwd).catch(() => null);
+    return repoKey === null || (await repoPrefs.get(repoKey)).enabled;
+  }
+
   // Reads are approved for the agent; writes still go to the user. Claude names the tool
-  // mcp__<server>__<tool>; Codex only names the server. Every request from the plugin's own
-  // workers is denied: they only read the text they were given.
+  // mcp__<server>__<tool>, and only the two read tools are approved; Codex only names the server.
+  // Every request from the plugin's own workers is denied: they only read the text they were given.
   server.on("agent.permission_requested", async ({ agent, request }, { paseo }) => {
     const { capture } = await runtime;
     capture.remember(paseo);
@@ -279,8 +292,9 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
       await paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "deny", message: "Memory workers may not use tools." } });
       return;
     }
-    const isRead = request.name.startsWith(`mcp__${READ_SERVER}__`) || (request.name === "CodexMcpElicitation" && request.metadata?.serverName === READ_SERVER);
+    const isRead = READ_TOOL_REQUESTS.has(request.name) || (request.name === "CodexMcpElicitation" && request.metadata?.serverName === READ_SERVER);
     if (!isRead || !(await currentSettings()).autoApproveReads) return;
+    if (!(await givesMemoryTools(agent.provider, agent.cwd))) return;
     await paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
   });
 
