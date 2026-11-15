@@ -13,8 +13,8 @@ import { assertNoSecret } from "./secrets";
 import type { SearchIndex } from "./search-index";
 import { FactNotFoundError, type MemoryStore } from "./store";
 import type { UsageLog } from "./usage";
-import { isVisibleToAgents, orderForAgents } from "./visibility";
-import { factMatchesFiles } from "./work-files";
+import { hasEnded, isVisibleToAgents, orderForAgents } from "./visibility";
+import { PathMatcher } from "./work-files";
 
 // Distinctive names: read requests are approved by server name, so a user's own server must not share it.
 export const READ_SERVER = "paseo-memorise";
@@ -25,6 +25,8 @@ const MAX_REQUEST_BYTES = 256 * 1024;
 const WRITES_PER_HOUR = 20;
 const HOUR_MS = 60 * 60 * 1000;
 const GIT_TIMEOUT_MS = 2_000;
+// How long one memory_search may spend matching the caller's paths against memories' file globs.
+const PATH_SEARCH_BUDGET_MS = 500;
 
 export interface MemoryMcpOptions {
   store: MemoryStore;
@@ -195,7 +197,10 @@ export class MemoryMcp {
         const expiryDays = await this.options.expiryDays();
         const all = await this.factsFor(scope);
         let facts = orderForAgents(all.filter((fact) => isVisibleToAgents(fact, expiryDays)));
-        if (paths?.length) facts = facts.filter((fact) => factMatchesFiles(fact, paths));
+        // One matcher for the whole search, so its time budget covers every memory's globs together.
+        const matcher = paths?.length ? new PathMatcher(paths, PATH_SEARCH_BUDGET_MS) : null;
+        if (matcher) facts = facts.filter((fact) => matcher.matches(fact));
+        const cutShort = matcher?.skipped ? " File matching ran out of time, so some memories about those paths may be missing; search again with fewer paths." : "";
         const max = limit ?? 8;
         let found: FactListItem[];
         if (query?.trim()) {
@@ -206,11 +211,11 @@ export class MemoryMcp {
         } else {
           found = facts.slice(0, max);
         }
-        if (found.length === 0) return { result: `No memories match${query ? ` "${query}"` : ""}${paths?.length ? " for those paths" : ""}.`, id: null };
+        if (found.length === 0) return { result: `No memories match${query ? ` "${query}"` : ""}${paths?.length ? " for those paths" : ""}.${cutShort}`, id: null };
         // A fact an agent found is a fact in use; only facts nobody reaches expire.
         for (const fact of found) await store.markUsed(fact.id, scope.repoKey);
         await this.options.usage.record("found", found.map((fact) => fact.id));
-        return { result: found.map((fact) => describeFact(fact)).join("\n\n"), id: null };
+        return { result: `${found.map((fact) => describeFact(fact)).join("\n\n")}${cutShort ? `\n\n${cutShort.trim()}` : ""}`, id: null };
       }),
     );
     mcp.registerTool(
@@ -220,7 +225,10 @@ export class MemoryMcp {
         const fact = (await this.factsFor(scope)).find((candidate) => candidate.id === factIdSchema.parse(id));
         if (!fact) throw new FactNotFoundError(id);
         if (!fact.enabled) throw new Error(`Memory ${id} is turned off by the user`);
-        if (fact.status === "active" && !fact.superseded) await store.markUsed(id, scope.repoKey);
+        const current = fact.status === "active" && !fact.superseded;
+        // The end date is about what agents are shown as current; archived and older versions stay readable by id.
+        if (current && hasEnded(fact)) throw new Error(`Memory ${id} ended on ${fact.until}; the user set that as its last day for agents`);
+        if (current) await store.markUsed(id, scope.repoKey);
         await this.options.usage.record("read", [id]);
         return { result: describeFact(fact), id };
       }),

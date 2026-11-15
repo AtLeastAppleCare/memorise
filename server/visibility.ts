@@ -3,13 +3,19 @@ import type { PathMatcher } from "./work-files";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+// Past the end date the user set, which lasts to the end of that day, UTC. An ended memory is shown
+// to agents nowhere: not in the index, not in search, and not when read by its id.
+export function hasEnded(fact: Pick<FactListItem, "until">, now = Date.now()): boolean {
+  return fact.until !== null && now >= Date.parse(fact.until) + DAY_MS;
+}
+
 // What agents see: current versions only, not turned off, and not past their end date (which lasts
 // to the end of that day, UTC). Agent-written facts unused for expiryDays drop out of the index and
 // search (they stay on disk and in the Memory panel). Facts the user saved or pinned never expire.
 // expiryDays 0 means "never hide".
 export function isVisibleToAgents(fact: FactListItem, expiryDays: number, now = Date.now()): boolean {
   if (fact.status !== "active" || fact.superseded || !fact.enabled) return false;
-  if (fact.until !== null && now >= Date.parse(fact.until) + DAY_MS) return false;
+  if (hasEnded(fact, now)) return false;
   if (expiryDays === 0 || fact.source.by === "user" || fact.pinned) return true;
   return now - Date.parse(fact.lastUsed) <= expiryDays * DAY_MS;
 }

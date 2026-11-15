@@ -9,7 +9,7 @@ import { newFactId } from "./store";
 import { tempDir } from "./test-temp-dir";
 import { UsageLog } from "./usage";
 import { isVisibleToAgents, listReason, rankForAgent } from "./visibility";
-import { factMatchesFiles, PathMatcher, workFiles } from "./work-files";
+import { PathMatcher, workFiles } from "./work-files";
 
 function fact(overrides: Partial<FactListItem> = {}): FactListItem {
   const now = new Date().toISOString();
@@ -83,9 +83,24 @@ describe("ranking for a new agent", () => {
   });
 
   it("matches path globs and cited files", () => {
-    expect(factMatchesFiles(fact({ paths: ["src/**/*.ts"] }), ["src/a/b.ts"])).toBe(true);
-    expect(factMatchesFiles(fact({ paths: ["docs/**"] }), ["src/a.ts"])).toBe(false);
-    expect(factMatchesFiles(fact({ citations: [{ path: "a.ts", commit: "abc1234" }] }), ["a.ts"])).toBe(true);
+    expect(new PathMatcher(["src/a/b.ts"]).matches(fact({ paths: ["src/**/*.ts"] }))).toBe(true);
+    expect(new PathMatcher(["src/a.ts"]).matches(fact({ paths: ["docs/**"] }))).toBe(false);
+    // The time budget holds inside one glob too: a costly glob over 2,000 long file names stops
+    // when the budget is spent, counts as no match, and says it was cut short.
+    const many = Array.from({ length: 2_000 }, (_, i) => `${"a".repeat(70)}${i}`);
+    const costly = `{${Array.from({ length: 20 }, (_, i) => String.fromCharCode(97 + i) + i).join(",")}}${"*[b-za]".repeat(12)}0`;
+    expect(costly.length).toBeLessThanOrEqual(200);
+    // The budget is far below what a full pass costs on any machine, so it is always what stops it.
+    const budgeted = new PathMatcher(many, 5);
+    const begun = Date.now();
+    expect(budgeted.matches(fact({ paths: [costly] }))).toBe(false);
+    expect(Date.now() - begun).toBeLessThan(300);
+    expect(budgeted.skipped).toBe(true);
+    // One stored glob must never hold up agent creation, whatever it looks like.
+    const started = Date.now();
+    expect(new PathMatcher(["a".repeat(40)]).matches(fact({ paths: [`${"*a".repeat(10)}b`] }))).toBe(false);
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(new PathMatcher(["a.ts"]).matches(fact({ citations: [{ path: "a.ts", commit: "abc1234" }] }))).toBe(true);
   });
 
   it("refuses path globs that escape the repo or expand without bound", () => {
