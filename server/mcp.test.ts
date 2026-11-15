@@ -259,6 +259,28 @@ describe("memory MCP servers", () => {
     expect((await new UsageLog(store.root).counts())[docker?.id ?? ""]?.found).toBe(1);
   });
 
+  it("stops showing a memory to agents after its end date, by search and by id, but still reads an archived one by id", async () => {
+    const source = { by: "user" as const, provider: null, branch: null, commit: null };
+    const ended = await store.create({ scope: "repo", repoKey: REPO, type: "gotcha", subject: "docker ended", body: "Docker note for last year.", until: "2020-01-01", supersedes: null, source, citations: [] });
+    const lasting = await store.create({ scope: "repo", repoKey: REPO, type: "gotcha", subject: "docker lasting", body: "Docker note with a far end date.", until: "2999-01-01", supersedes: null, source, citations: [] });
+    const archived = await store.create({ scope: "repo", repoKey: REPO, type: "gotcha", subject: "docker archived", body: "Docker note, archived.", supersedes: null, source, citations: [] });
+    await store.retire(archived.id, REPO);
+    const archivedAndEnded = await store.create({ scope: "repo", repoKey: REPO, type: "gotcha", subject: "docker archived and ended", body: "Docker note, archived after it ended.", until: "2020-01-01", supersedes: null, source, citations: [] });
+    await store.retire(archivedAndEnded.id, REPO);
+    const reader = await connect("read", bearer({ repoKey: REPO, cwd: "/tmp", provider: "claude" }));
+    expect((await call(reader, "memory_search", { query: "docker" })).text).not.toContain(ended.id);
+    const read = await call(reader, "memory_read", { id: ended.id });
+    expect(read.isError).toBe(true);
+    expect(read.text).toBe(`Memory ${ended.id} ended on 2020-01-01; the user set that as its last day for agents`);
+    expect(read.text).not.toContain("Docker note for last year");
+    expect((await call(reader, "memory_read", { id: lasting.id })).text).toContain("Docker note with a far end date.");
+    expect((await call(reader, "memory_read", { id: archived.id })).text).toContain("status: retired");
+    // The end date is about what agents are shown as current; history stays readable by id as before.
+    expect((await call(reader, "memory_read", { id: archivedAndEnded.id })).text).toContain("status: retired");
+    await store.supersede(ended.id, REPO, { body: "Docker note for last year, reworded.", source });
+    expect((await call(reader, "memory_read", { id: ended.id })).text).toContain("status: replaced by a newer version");
+  });
+
   it("hides a disabled memory from search and read, and finds a manual one by search", async () => {
     const source = { by: "user" as const, provider: null, branch: null, commit: null };
     const off = await store.create({ scope: "repo", repoKey: REPO, type: "gotcha", subject: "docker off", body: "Docker note one.", enabled: false, supersedes: null, source, citations: [] });

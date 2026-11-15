@@ -417,8 +417,8 @@ export class Capture {
   }
 
   // Starts one tidy pass over a repo's current facts; `done` settles with how many proposals it
-  // added. One pass per repo at a time; the attempt is recorded before it runs and counts against the
-  // daily limit. Checks that can fail at once throw here.
+  // added. One pass per repo at a time; the attempt counts against the daily limit and, once the
+  // limit allows it, is recorded before it runs. Checks that can fail at once throw here.
   async startTidy(repoKey: string, cwd: string | null): Promise<{ done: Promise<number> }> {
     if (this.tidying.has(repoKey)) throw new Error("A clean-up of this project is already running");
     // Marked before the first await, so a second call can never slip in between.
@@ -429,10 +429,12 @@ export class Capture {
       if (facts.length < 2) throw new Error("Clean up needs at least 2 memories agents can see in this project");
       const paseo = this.paseo;
       if (!paseo) throw new Error("The plugin has not seen Paseo yet; open an agent and try again");
+      // The limit is checked first: a clean-up it refuses never ran, so it must not be recorded as one,
+      // or the weekly sweep would skip the project for a week.
+      await this.requireRun(`tidy of ${repoKey}`, values.captureMaxPerDay);
       await this.serializeState((state) => {
         state.tidiedAt[repoKey] = new Date().toISOString();
       });
-      await this.requireRun(`tidy of ${repoKey}`, values.captureMaxPerDay);
       const run = this.track(repoKey, "tidy", this.runTidy(paseo, repoKey, cwd, facts, values), (count) => `${count} suggested`);
       return { done: run.finally(() => this.tidying.delete(repoKey)) };
     } catch (error) {

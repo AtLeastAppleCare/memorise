@@ -1,8 +1,8 @@
 import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { matchesGlob } from "node:path/posix";
 import type { FactListItem } from "../shared/memory";
 import { git } from "./git";
+import { compileGlob } from "./glob";
 
 const GIT_TIMEOUT_MS = 1_000;
 const MAX_FILES = 2_000;
@@ -66,8 +66,9 @@ export async function recentFiles(
 
 // Answers "is this fact about any of these files?" (by its path globs or the files it cites). Each
 // distinct glob is matched against the files once and remembered, and glob matching stops when the
-// time budget is spent: later globs count as no match and `skipped` says so, so ranking can never
-// hold up agent creation.
+// time budget is spent: what is left counts as no match and `skipped` says so. The budget is read
+// before every file, and one glob against one file is itself bounded (see glob.ts), so ranking
+// cannot hold up agent creation for longer than the budget plus one such match.
 export class PathMatcher {
   private readonly files: readonly string[];
   private readonly fileSet: ReadonlySet<string>;
@@ -88,17 +89,23 @@ export class PathMatcher {
       this.skipped = true;
       return false;
     }
-    const result = this.files.some((file) => matchesGlob(file, glob));
-    this.globs.set(glob, result);
-    return result;
+    const matchesFile = compileGlob(glob);
+    for (const file of this.files) {
+      if (Date.now() >= this.deadline) {
+        this.skipped = true;
+        return false;
+      }
+      if (matchesFile(file)) {
+        this.globs.set(glob, true);
+        return true;
+      }
+    }
+    this.globs.set(glob, false);
+    return false;
   }
 
   matches(fact: Pick<FactListItem, "paths" | "citations">): boolean {
     if (this.files.length === 0) return false;
     return fact.citations.some((citation) => this.fileSet.has(citation.path)) || fact.paths.some((glob) => this.globMatches(glob));
   }
-}
-
-export function factMatchesFiles(fact: Pick<FactListItem, "paths" | "citations">, files: readonly string[]): boolean {
-  return new PathMatcher(files).matches(fact);
 }

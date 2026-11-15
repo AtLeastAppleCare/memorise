@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -686,6 +686,13 @@ describe("tidy limits", () => {
     // The daily limit (shared with capture) now stops further tidy runs, and says so.
     await expect(capture.startTidy(REPO, null)).rejects.toThrow(/background runs are used up/);
     expect(fake.created).toHaveLength(1);
+    // A clean-up the limit refused never ran, so it is not recorded: the weekly sweep tries that
+    // project again at its next pass instead of a week later.
+    const other = "github.com/acme/web";
+    for (const subject of ["three", "four"]) await store.create({ scope: "repo", repoKey: other, type: "howto", subject, body: subject, supersedes: null, source, citations: [] });
+    await expect(capture.startTidy(other, null)).rejects.toThrow(/background runs are used up/);
+    const state = JSON.parse(await readFile(join(root, "capture-state.json"), "utf8"));
+    expect(Object.keys(state.tidiedAt)).toEqual([REPO]);
     capture.stop();
   });
 });
