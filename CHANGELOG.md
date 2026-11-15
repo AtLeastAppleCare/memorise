@@ -4,6 +4,14 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-15
+
+### Changed
+
+- **"Memory for this project" off now also stops session suggestions there.** Sessions in that project are no longer read by a background run, whatever "Suggestions from sessions" says for it. Automatic project scans already skipped such projects.
+- **"Read memories without asking" approves less.** It now approves only Memorise's two read tools, `memory_search` and `memory_read`, by their exact names, and only where Memorise gives agents its tools. With memory off, in a project with memory off, or for a provider Memorise does not support, a request that carries the read server's name is left for you to answer. Before, any tool under a server named `paseo-memorise` was approved. With Codex, which names only the server in its request, the server name is still what is checked.
+- An agent that was given the memory tools before you turned memory off keeps them; its reads now ask you first.
+
 ## [0.13.1] - 2026-11-15
 
 ### Fixed
