@@ -4,6 +4,14 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-15
+
+### Fixed
+
+- A memory's file pattern can no longer hold up new agents. Patterns with many `*` (for example `*a*a*a*a*a*a*a*a*a*a*a*ab`) took Node's matcher seconds to minutes on a single file name, and every new agent in the project waited for it; an agent, a background run or an import could save such a pattern. Memorise now matches file patterns itself, without backtracking: one pattern against one path takes a few milliseconds at most, and the time allowed for matching is now checked before every file, in `memory_search` as well (which says so when it runs out). Results are the same as before for ordinary patterns such as `src/**/*.ts`, `docs/**`, `*.{ts,tsx}` and `src/[ab]pi/*`; a few unusual shapes that Node's matcher treats specially follow the plain rules instead (for example `**/src/**/.env` now matches `x/src/y/.env`).
+- `memory_read` no longer returns a memory after its end date. The end date already kept it out of the list and out of search; an agent that had its id could still read it. Archived memories and older versions can still be read by id, as before, whatever their end date.
+- A weekly clean-up that the daily limit of background runs refused is tried again at the next pass. It was recorded as done, so the project went another week without one; a refused clean-up you started by hand delayed the weekly one the same way.
+
 ## [0.13.0] - 2026-11-15
 
 ### Added
