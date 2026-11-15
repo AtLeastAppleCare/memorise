@@ -412,6 +412,38 @@ describe("memorise server entry", () => {
     await expect(fake.call("memory.tidy", { where: repo })).rejects.toThrow(/at least 2 memories/);
   });
 
+  it("lets the app choose a custom type the user listed, and no other", async () => {
+    const fake = start({ ...defaults, customTypes: ["eval-trap"] });
+    const repo = { repoKey: "github.com/acme/api" };
+    expect(await fake.call("memory.types", {})).toEqual({ types: ["preference", "decision", "gotcha", "howto", "reference", "eval-trap"] });
+    const { fact } = await fake.call("memory.save", { where: repo, scope: "repo", type: "eval-trap", subject: "local eval", body: "Local eval needs --local-images." });
+    expect(fact.type).toBe("eval-trap");
+    await expect(fake.call("memory.save", { where: repo, scope: "repo", type: "runbook", subject: "deploys", body: "Deploys go through make release." })).rejects.toThrow('Type "runbook" is not one of: preference, decision, gotcha, howto, reference, eval-trap.');
+    await expect(fake.call("memory.update", { where: repo, id: fact.id, type: "runbook" })).rejects.toThrow('Type "runbook" is not one of');
+    expect((await fake.call("memory.update", { where: repo, id: fact.id, type: "gotcha" })).fact.type).toBe("gotcha");
+    const imported = await fake.call("memory.import", { where: repo, scope: "repo", dryRun: false, text: JSON.stringify([{ type: "eval-trap", body: "Eval images live in fixtures." }, { type: "runbook", body: "Rotate keys monthly." }]) });
+    expect(imported.added).toEqual([{ type: "eval-trap", subject: "Eval images live in fixtures." }]);
+    expect(imported.skipped).toEqual([expect.objectContaining({ reason: expect.stringContaining('Type "runbook" is not one of') })]);
+  });
+
+  it("keeps a memory whose type left the list usable: listed, edited, reverted, moved, and a waiting suggestion approved", async () => {
+    const fake = start();
+    const repo = { repoKey: "github.com/acme/api" };
+    const source = { by: "user" as const, provider: null, branch: null, commit: null };
+    const v1 = await new MemoryStore(root).create({ scope: "repo", repoKey: repo.repoKey, type: "eval-trap", subject: "local eval", body: "Local eval needs --local-images.", supersedes: null, source, citations: [] });
+    expect((await fake.call("memory.list", { where: repo })).facts.map((fact: { type: string }) => fact.type)).toEqual(["eval-trap"]);
+    const { fact: v2 } = await fake.call("memory.update", { where: repo, id: v1.id, body: "Local eval needs --local-images DIR.", type: "eval-trap" });
+    expect(v2).toMatchObject({ type: "eval-trap", body: "Local eval needs --local-images DIR." });
+    const { fact: v3 } = await fake.call("memory.revert", { where: repo, id: v2.id, versionId: v1.id });
+    expect(v3.type).toBe("eval-trap");
+    expect((await fake.call("memory.move", { where: repo, id: v3.id, to: "global" })).fact.type).toBe("eval-trap");
+    await expect(fake.call("memory.save", { where: repo, scope: "repo", type: "eval-trap", subject: "another", body: "Another one." })).rejects.toThrow('Type "eval-trap" is not one of');
+    await new ProposalStore(root).add([{ repoKey: repo.repoKey, kind: "new", targets: [], type: "eval-trap", subject: "suggested", body: "Suggested while the type was listed.", paths: [], reason: "", source: { from: "capture", agentId: "agent-1", provider: "claude", model: null } }], []);
+    const [proposal] = (await fake.call("memory.proposals.list", { where: repo })).proposals;
+    await fake.call("memory.proposals.approve", { where: repo, id: proposal.id });
+    expect((await fake.call("memory.list", { where: repo })).facts.find((fact: { subject: string }) => fact.subject === "suggested").type).toBe("eval-trap");
+  });
+
   it("counts pending proposals per repo", async () => {
     const fake = start();
     const source = { from: "capture" as const, agentId: null, provider: "claude", model: null };

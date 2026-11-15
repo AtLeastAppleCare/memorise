@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { allowedTypes } from "../shared/memory";
 import { checkCitations } from "./citations";
 import { type AgentScope, loadTokenSecret, TokenAuthority } from "./mcp-auth";
 import { MemoryMcp, mcpServerEntries, READ_SERVER, WRITE_SERVER } from "./mcp";
@@ -40,12 +41,14 @@ describe("memory MCP servers", () => {
   let port: number;
   let clients: Client[];
   let keys: ProjectKeys;
+  let customTypes: string[];
 
   beforeEach(async () => {
+    customTypes = [];
     store = new MemoryStore(tempDir("memorise-"));
     tokens = new TokenAuthority(randomBytes(32));
     keys = new ProjectKeys(store.root);
-    http = await new MemoryMcp({ store, tokens, search: new SearchIndex(store.root), usage: new UsageLog(store.root), keys, expiryDays: async () => 60, includeGlobal: async () => true }).listen(0);
+    http = await new MemoryMcp({ store, tokens, search: new SearchIndex(store.root), usage: new UsageLog(store.root), keys, expiryDays: async () => 60, includeGlobal: async () => true, types: async () => allowedTypes(customTypes) }).listen(0);
     port = (http.address() as AddressInfo).port;
     clients = [];
   });
@@ -84,6 +87,26 @@ describe("memory MCP servers", () => {
     const writeTools = (await (await connect("write", auth)).listTools()).tools.map((tool) => tool.name);
     expect(readTools.sort()).toEqual(["memory_read", "memory_search"]);
     expect(writeTools.sort()).toEqual(["memory_retire", "memory_update", "memory_write"]);
+  });
+
+  it("tells agents the argument names and the types they may choose, custom ones included", async () => {
+    const auth = bearer({ repoKey: REPO, cwd: "/tmp", provider: "claude" });
+    const listed = async () => (await (await connect("write", auth)).listTools()).tools.find((tool) => tool.name === "memory_write");
+    const builtIn = await listed();
+    expect(builtIn?.description).toContain("Arguments: type, subject (a short title), fact (the text)");
+    expect(builtIn?.inputSchema.properties?.type).toMatchObject({ enum: ["preference", "decision", "gotcha", "howto", "reference"] });
+    customTypes = ["eval-trap"];
+    expect((await listed())?.inputSchema.properties?.type).toMatchObject({ enum: ["preference", "decision", "gotcha", "howto", "reference", "eval-trap"] });
+  });
+
+  it("saves a custom type the user listed and refuses any other, saving nothing", async () => {
+    customTypes = ["eval-trap"];
+    const writer = await connect("write", bearer({ repoKey: REPO, cwd: "/tmp", provider: "claude" }));
+    expect((await call(writer, "memory_write", { type: "eval-trap", subject: "local eval", fact: "Local eval needs --local-images." })).isError).toBe(false);
+    const refused = await call(writer, "memory_write", { type: "runbook", subject: "deploys", fact: "Deploys go through make release." });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).toContain('"eval-trap"');
+    expect((await store.list(REPO)).map((fact) => fact.type)).toEqual(["eval-trap"]);
   });
 
   it("writes into the token's repo, pins citations to HEAD, and finds the fact by search", async () => {
@@ -251,7 +274,7 @@ describe("memory MCP servers", () => {
 
   it("keeps global memories from an agent whose repo is set apart from them", async () => {
     await new Promise((resolve) => http.close(resolve));
-    http = await new MemoryMcp({ store, tokens, search: new SearchIndex(store.root), usage: new UsageLog(store.root), keys: new ProjectKeys(store.root), expiryDays: async () => 60, includeGlobal: async (repoKey) => repoKey !== REPO }).listen(0);
+    http = await new MemoryMcp({ store, tokens, search: new SearchIndex(store.root), usage: new UsageLog(store.root), keys: new ProjectKeys(store.root), expiryDays: async () => 60, includeGlobal: async (repoKey) => repoKey !== REPO, types: async () => allowedTypes([]) }).listen(0);
     port = (http.address() as AddressInfo).port;
     const source = { by: "user" as const, provider: null, branch: null, commit: null };
     const global = await store.create({ scope: "global", repoKey: null, type: "preference", subject: "docker global", body: "Docker everywhere.", supersedes: null, source, citations: [] });
@@ -273,7 +296,7 @@ describe("shutdown", () => {
   it("closes promptly while an agent's client is still connected", async () => {
     const tokens = new TokenAuthority(randomBytes(32));
     const root = tempDir("memorise-");
-    const http = await new MemoryMcp({ store: new MemoryStore(root), tokens, search: new SearchIndex(root), usage: new UsageLog(root), keys: new ProjectKeys(root), expiryDays: async () => 60, includeGlobal: async () => true }).listen(0);
+    const http = await new MemoryMcp({ store: new MemoryStore(root), tokens, search: new SearchIndex(root), usage: new UsageLog(root), keys: new ProjectKeys(root), expiryDays: async () => 60, includeGlobal: async () => true, types: async () => allowedTypes([]) }).listen(0);
     const port = (http.address() as AddressInfo).port;
     const client = new Client({ name: "test", version: "0" });
     const authorization = `Bearer ${tokens.mint({ repoKey: null, cwd: "/tmp", provider: "claude" })}`;

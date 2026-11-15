@@ -34,6 +34,11 @@ describe("MemoryStore", () => {
     expect(first < second).toBe(true);
   });
 
+  it("reads back a memory whose type is not a built-in one, so a change to the allowed list never hides it", async () => {
+    const fact = await store.create(repoFact("Local eval needs --local-images.", { type: "eval-trap" }));
+    expect((await store.list(REPO)).map(({ id, type }) => ({ id, type }))).toEqual([{ id: fact.id, type: "eval-trap" }]);
+  });
+
   it("writes one Markdown file per fact under the repo key and reads it back", async () => {
     const fact = await store.create(repoFact("Integration tests need DOCKER_HOST set."));
     const files = await readdir(join(store.root, "repos", "github.com", "acme", "api"));

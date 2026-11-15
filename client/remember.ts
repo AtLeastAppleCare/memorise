@@ -1,4 +1,4 @@
-import { MAX_SUBJECT_CHARS, type MemoryType, memoryTypeSchema, type Scope } from "../shared/memory";
+import { MAX_SUBJECT_CHARS, type MemoryType, type Scope } from "../shared/memory";
 
 export interface RememberRequest {
   scope: Scope;
@@ -7,11 +7,12 @@ export interface RememberRequest {
   body: string;
 }
 
-export const REMEMBER_HINT = "[--global] [preference|decision|gotcha|howto|reference:] <fact>";
+export const REMEMBER_HINT = "[--global] [type:] <fact>";
 
 // `/remember [--global] [type:] <fact>`. Without a type the fact is a reference; without --global it
-// belongs to the workspace's repo.
-export function parseRemember(args: string): RememberRequest {
+// belongs to the workspace's repo. A `word:` prefix is a type only when it is one of `types`, the
+// types that may be chosen now; any other prefix is part of the fact.
+export function parseRemember(args: string, types: readonly string[]): RememberRequest {
   let rest = args.trim();
   let scope: Scope = "repo";
   if (/^--global\b/.test(rest)) {
@@ -19,9 +20,9 @@ export function parseRemember(args: string): RememberRequest {
     rest = rest.replace(/^--global\b/, "").trim();
   }
   let type: MemoryType = "reference";
-  const typed = /^([a-z]+):\s*/.exec(rest);
-  if (typed && memoryTypeSchema.safeParse(typed[1]).success) {
-    type = memoryTypeSchema.parse(typed[1]);
+  const typed = /^([a-z][a-z0-9-]*):\s*/.exec(rest);
+  if (typed && types.includes(typed[1])) {
+    type = typed[1];
     rest = rest.slice(typed[0].length);
   }
   const body = rest.trim();

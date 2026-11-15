@@ -33,8 +33,37 @@ export function bodyLengthProblem(body: string, limit: number): string | null {
   return length > limit ? `Memory must be ${formatCount(limit)} characters or less; this one has ${formatCount(length)}` : null;
 }
 
-export const memoryTypeSchema = z.enum(["preference", "decision", "gotcha", "howto", "reference"]);
+export const BUILTIN_TYPES = ["preference", "decision", "gotcha", "howto", "reference"] as const;
+export type BuiltinType = (typeof BUILTIN_TYPES)[number];
+export const MAX_CUSTOM_TYPES = 20;
+
+// What a stored type looks like. Whether a type may be chosen for a memory is a separate rule (the
+// built-in types plus the user's customTypes setting), checked where a type is chosen, so taking a
+// type off that list never makes stored memories unreadable.
+export const memoryTypeSchema = z
+  .string()
+  .regex(/^[a-z][a-z0-9-]{0,23}$/, "A memory type is a lowercase label such as eval-trap: letters, digits and dashes, starting with a letter, up to 24 characters");
 export type MemoryType = z.infer<typeof memoryTypeSchema>;
+
+export const customTypesSchema = z
+  .array(memoryTypeSchema)
+  .max(MAX_CUSTOM_TYPES)
+  .superRefine((types, context) => {
+    types.forEach((type, index) => {
+      if ((BUILTIN_TYPES as readonly string[]).includes(type)) context.addIssue({ code: "custom", path: [index], message: `"${type}" is a built-in type; list only your own` });
+      else if (types.indexOf(type) !== index) context.addIssue({ code: "custom", path: [index], message: `"${type}" is listed twice` });
+    });
+  });
+
+// The types that may be chosen for a memory: the built-in ones, then the user's own.
+export function allowedTypes(customTypes: readonly string[]): string[] {
+  return [...BUILTIN_TYPES, ...customTypes];
+}
+
+// Why a type cannot be chosen for a memory, or null when it can.
+export function typeProblem(type: string, allowed: readonly string[]): string | null {
+  return allowed.includes(type) ? null : `Type "${type}" is not one of: ${allowed.join(", ")}. Add it under Settings > Plugins > Memorise > Advanced > Custom kinds.`;
+}
 
 export const scopeSchema = z.enum(["global", "repo"]);
 export type Scope = z.infer<typeof scopeSchema>;
@@ -272,6 +301,13 @@ export const importMemoryRpc = defineRpc({
   }),
 });
 
+// The types that may be chosen for a memory now, for callers that cannot read settings themselves.
+export const listTypesRpc = defineRpc({
+  name: "memory.types",
+  input: z.object({}),
+  output: z.object({ types: z.array(memoryTypeSchema) }),
+});
+
 // Per-repo preferences, shared by every worktree of the repo. enabled false: new agents in the repo
 // get no memory and no memory tools. includeGlobal false: the repo's agents see no global memories.
 // capture: "default" follows the host setting; "on" or "off" overrides it for this repo.
@@ -468,6 +504,8 @@ export const memorySettings = defineSettings({
     // Project scans started by the plugin for every project with an open workspace: never, once per
     // project, or once and then a re-check each week.
     projectAutoScan: z.enum(["off", "once", "weekly"]).default("off"),
+    // Memory types of the user's own, allowed next to the built-in ones. Empty: built-in types only.
+    customTypes: customTypesSchema.default([]),
   }),
 });
 export type MemorySettings = z.infer<typeof memorySettings.schema>;

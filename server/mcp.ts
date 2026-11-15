@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { bodySchema, type Citation, citationSchema, type Fact, type FactListItem, factIdSchema, isFolderKey, MAX_CITATIONS, MAX_PATH_GLOBS, memoryTypeSchema, pathGlobSchema, subjectSchema } from "../shared/memory";
+import { bodySchema, type Citation, citationSchema, type Fact, type FactListItem, factIdSchema, isFolderKey, MAX_CITATIONS, MAX_PATH_GLOBS, pathGlobSchema, subjectSchema } from "../shared/memory";
 import { hashProjectFile } from "./file-hash";
 import { git } from "./git";
 import type { AgentScope, TokenAuthority } from "./mcp-auth";
@@ -38,6 +38,8 @@ export interface MemoryMcpOptions {
   expiryDays(): Promise<number>;
   // False when the agent's repo is set apart from global memories.
   includeGlobal(repoKey: string): Promise<boolean>;
+  // The types an agent may choose for a new memory: the built-in ones plus the user's own.
+  types(): Promise<string[]>;
 }
 
 export function mcpServerEntries(port: number, token: string) {
@@ -226,16 +228,16 @@ export class MemoryMcp {
     return mcp;
   }
 
-  buildWriteServer(scope: AgentScope): McpServer {
+  buildWriteServer(scope: AgentScope, types: readonly string[]): McpServer {
     const { store } = this.options;
     const mcp = new McpServer({ name: WRITE_SERVER, version: "0.1.0" });
     mcp.registerTool(
       "memory_write",
       {
         description:
-          "Save one durable fact about this repo for future agent sessions: a gotcha, decision, how-to, or reference that the code and docs do not already say. One fact per call. Never include secrets.",
+          "Save one durable fact about this repo for future agent sessions: a gotcha, decision, how-to, or reference that the code and docs do not already say. One fact per call. Never include secrets. Arguments: type, subject (a short title), fact (the text); optional citations and paths.",
         inputSchema: {
-          type: memoryTypeSchema,
+          type: z.enum(types as [string, ...string[]]),
           subject: subjectSchema.describe("A few words naming what the fact is about, on one line"),
           fact: bodySchema.describe("The fact itself, stated plainly"),
           citations: citationInput,
@@ -357,7 +359,7 @@ export class MemoryMcp {
       return;
     }
     // Stateless: a fresh server per request, so nothing about one agent leaks into another's session.
-    const mcp = path === READ_PATH ? this.buildReadServer(scope) : this.buildWriteServer(scope);
+    const mcp = path === READ_PATH ? this.buildReadServer(scope) : this.buildWriteServer(scope, await this.options.types());
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.on("close", () => {
       void transport.close();

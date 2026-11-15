@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeFilters, applyFilters, attentionGroups, DEFAULT_FILTERS, type ListedFact, mergeScopes, shownSelection } from "./manager-view";
+import { activeFilters, applyFilters, attentionGroups, DEFAULT_FILTERS, type ListedFact, mergeScopes, shownSelection, typeChoices } from "./manager-view";
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-10-24T12:00:00Z");
@@ -38,6 +38,16 @@ describe("manager filters", () => {
   it("names only the filters that differ from the defaults", () => {
     expect(activeFilters(DEFAULT_FILTERS, false)).toEqual([]);
     expect(activeFilters({ ...DEFAULT_FILTERS, type: "gotcha", control: "off" }, false).map((filter) => filter.label)).toEqual(["Gotcha", "Off"]);
+  });
+
+  it("filters by a custom type, even one named any, and offers a chip for every type in use", () => {
+    const facts = [fact({ type: "howto" }), fact({ type: "any" }), fact({ type: "eval-trap" })];
+    expect(applyFilters(facts, { ...DEFAULT_FILTERS, type: "any" }, "repo", null, NOW).map((listed) => listed.type)).toEqual(["any"]);
+    expect(applyFilters(facts, { ...DEFAULT_FILTERS, type: "eval-trap" }, "repo", null, NOW).map((listed) => listed.type)).toEqual(["eval-trap"]);
+    expect(applyFilters(facts, DEFAULT_FILTERS, "repo", null, NOW)).toHaveLength(3);
+    expect(DEFAULT_FILTERS.type).toBeNull();
+    expect(activeFilters({ ...DEFAULT_FILTERS, type: "eval-trap" }, false).map((filter) => filter.label)).toEqual(["eval-trap"]);
+    expect(typeChoices(["preference", "decision", "gotcha", "howto", "reference", "runbook"], facts)).toEqual(["preference", "decision", "gotcha", "howto", "reference", "runbook", "any", "eval-trap"]);
   });
 
   it("leaves out the sort chip while a search orders the list", () => {

@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import type { Activation, listMemoriesRpc, MemoryType, Scope } from "../shared/memory";
-import { ACTIVATION, KIND } from "./copy";
+import { ACTIVATION, kindLabel } from "./copy";
 
 // What the manager shows, worked out without React so it can be tested.
 export type ListedFact = z.infer<typeof listMemoriesRpc.output>["facts"][number];
@@ -11,12 +11,19 @@ export type Sort = "changed" | "created" | "most used" | "least used";
 
 export interface ViewFilters {
   status: Status;
-  type: MemoryType | "any";
+  // null: every type. Not a word such as "any", which a user may give to a type of their own.
+  type: MemoryType | null;
   control: Control;
   sort: Sort;
 }
 
-export const DEFAULT_FILTERS: ViewFilters = { status: "current", type: "any", control: "any", sort: "changed" };
+export const DEFAULT_FILTERS: ViewFilters = { status: "current", type: null, control: "any", sort: "changed" };
+
+// The types the filter and the editor offer: those that may be chosen now, then any other type the
+// given memories still have (a type taken off the user's list stays on the memories that use it).
+export function typeChoices(allowed: readonly string[], facts: readonly { type: string }[]): string[] {
+  return [...new Set([...allowed, ...facts.map((fact) => fact.type)])];
+}
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 // A memory nobody has been shown, read, or found this long after it was saved needs a look.
@@ -70,7 +77,7 @@ const SORTS: Record<Sort, (a: ListedFact, b: ListedFact) => number> = {
 export function activeFilters(filters: ViewFilters, searching: boolean): { key: keyof ViewFilters; label: string }[] {
   const active: { key: keyof ViewFilters; label: string }[] = [];
   if (filters.status !== DEFAULT_FILTERS.status) active.push({ key: "status", label: STATUS_LABEL[filters.status] });
-  if (filters.type !== "any") active.push({ key: "type", label: KIND[filters.type] });
+  if (filters.type !== null) active.push({ key: "type", label: kindLabel(filters.type) });
   if (filters.control !== DEFAULT_FILTERS.control) active.push({ key: "control", label: CONTROL_LABEL[filters.control] });
   if (!searching && filters.sort !== DEFAULT_FILTERS.sort) active.push({ key: "sort", label: SORT_LABEL[filters.sort] });
   return active;
@@ -81,7 +88,7 @@ export function activeFilters(filters: ViewFilters, searching: boolean): { key: 
 export function applyFilters(facts: readonly ListedFact[], filters: ViewFilters, scope: Scope, searchIds: readonly string[] | null, now = Date.now()): ListedFact[] {
   const rank = searchIds ? new Map(searchIds.map((id, index) => [id, index])) : null;
   const kept = facts.filter(
-    (fact) => fact.scope === scope && (!rank || rank.has(fact.id)) && matchesStatus(fact, filters.status) && (filters.type === "any" || fact.type === filters.type) && matchesControl(fact, filters.control, now),
+    (fact) => fact.scope === scope && (!rank || rank.has(fact.id)) && matchesStatus(fact, filters.status) && (filters.type === null || fact.type === filters.type) && matchesControl(fact, filters.control, now),
   );
   return rank ? kept.sort((a, b) => (rank.get(a.id) ?? 0) - (rank.get(b.id) ?? 0)) : kept.sort(SORTS[filters.sort]);
 }

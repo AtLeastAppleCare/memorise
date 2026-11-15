@@ -2,8 +2,10 @@ import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import { useMutation } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Switch, Text, TextInput, View } from "react-native";
-import { type Activation, activationSchema, DEFAULT_BODY_CHARS, type Fact, MAX_SUBJECT_CHARS, type MemoryType, memorySettings, memoryTypeSchema, saveMemoryRpc, type Scope, updateMemoryRpc, type Where } from "../shared/memory";
-import { ACTIVATION, KIND, lengthNote } from "./copy";
+import { type Activation, activationSchema, DEFAULT_BODY_CHARS, type Fact, MAX_SUBJECT_CHARS, type MemoryType, memorySettings, saveMemoryRpc, type Scope, updateMemoryRpc, type Where } from "../shared/memory";
+import { useAllowedTypes } from "./allowed-types";
+import { ACTIVATION, kindLabel, lengthNote } from "./copy";
+import { typeChoices } from "./manager-view";
 import { memoryChanged } from "./memory-events";
 import { Chip, type Styles } from "./panel-ui";
 import { errorText } from "./copy";
@@ -15,6 +17,8 @@ export function FactEditor({ where, fact, defaultScope, hasRepo, styles, onDone 
   const save = useRpc(saveMemoryRpc);
   const update = useRpc(updateMemoryRpc);
   const settings = useSettings(memorySettings);
+  // A memory whose type has left the user's list keeps a chip for it, so editing never changes it unasked.
+  const allowed = useAllowedTypes();
   // The daemon checks the same limit on save; this only shows it while typing.
   const maxBody = settings.status === "ready" ? settings.values.memoryMaxChars : DEFAULT_BODY_CHARS;
   const [subject, setSubject] = useState(fact?.subject ?? "");
@@ -57,8 +61,8 @@ export function FactEditor({ where, fact, defaultScope, hasRepo, styles, onDone 
       {bodyNote && <Text style={noteStyle(bodyNote)}>{bodyNote.text}</Text>}
       <Text style={styles.muted}>Kind</Text>
       <View style={styles.row}>
-        {memoryTypeSchema.options.map((option) => (
-          <Chip key={option} label={KIND[option]} on={type === option} onPress={() => setType(option)} styles={styles} />
+        {typeChoices(allowed, fact ? [fact] : []).map((option) => (
+          <Chip key={option} label={kindLabel(option)} on={type === option} onPress={() => setType(option)} styles={styles} />
         ))}
       </View>
       {!fact && (

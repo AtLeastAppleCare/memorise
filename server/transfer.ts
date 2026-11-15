@@ -10,6 +10,7 @@ import {
   memoryTypeSchema,
   pathGlobSchema,
   subjectSchema,
+  typeProblem,
   untilSchema,
 } from "../shared/memory";
 import { assertNoSecret } from "./secrets";
@@ -58,6 +59,7 @@ function subjectFrom(text: string): string {
 }
 
 const jsonEntrySchema = z.object({
+  // The format only; whether the type may be chosen is checked against the allowed list in check().
   type: memoryTypeSchema.default("reference"),
   subject: z.string().optional(),
   body: z.string(),
@@ -69,19 +71,26 @@ const jsonEntrySchema = z.object({
 });
 
 // "- [type] subject: body" (a Memorise export), "[2026-03-02] - text" (assistant memory exports),
-// or plain text, each optionally starting with "- " or "* ".
-const LINE = /^(?:[-*]\s+)?(?:\[\d{4}-\d{2}-\d{2}\]\s*-\s*)?(?:\[(preference|decision|gotcha|howto|reference)\]\s+)?(.+)$/;
+// or plain text, each optionally starting with "- " or "* ". A bracket prefix is a type only when it
+// is one of the allowed types; any other stays part of the text.
+const LINE = /^(?:[-*]\s+)?(?:\[\d{4}-\d{2}-\d{2}\]\s*-\s*)?(.+)$/;
+const TYPE_PREFIX = /^\[([a-z][a-z0-9-]*)\]\s+/;
 
-function fromLine(line: string): ImportEntry {
-  const [, type, text] = LINE.exec(line) ?? [];
+function fromLine(line: string, types: readonly string[]): ImportEntry {
+  const [, rest] = LINE.exec(line) ?? [];
+  const prefix = TYPE_PREFIX.exec(rest);
+  const type = prefix && types.includes(prefix[1]) ? prefix[1] : undefined;
+  const text = type && prefix ? rest.slice(prefix[0].length) : rest;
   const split = text.indexOf(": ");
   const hasSubject = split > 0 && split <= MAX_SUBJECT_CHARS;
-  return { type: (type as MemoryType | undefined) ?? "reference", subject: hasSubject ? text.slice(0, split) : subjectFrom(text), body: hasSubject ? text.slice(split + 2) : text, paths: [] };
+  return { type: type ?? "reference", subject: hasSubject ? text.slice(0, split) : subjectFrom(text), body: hasSubject ? text.slice(split + 2) : text, paths: [] };
 }
 
 // Every entry passes the same checks as a memory saved in the app; one that does not is skipped
 // with its reason, never dropped silently.
-function check(entry: ImportEntry): string | null {
+function check(entry: ImportEntry, types: readonly string[]): string | null {
+  const problem = typeProblem(entry.type, types);
+  if (problem) return problem;
   for (const [schema, value] of [[subjectSchema, entry.subject], [bodySchema, entry.body]] as const) {
     const parsed = schema.safeParse(value);
     if (!parsed.success) return parsed.error.issues[0].message;
@@ -95,7 +104,7 @@ function check(entry: ImportEntry): string | null {
   return null;
 }
 
-function candidates(text: string): { line: string; entry: ImportEntry | null; reason?: string }[] {
+function candidates(text: string, types: readonly string[]): { line: string; entry: ImportEntry | null; reason?: string }[] {
   const trimmed = text.trim();
   if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
     let data: unknown;
@@ -118,13 +127,14 @@ function candidates(text: string): { line: string; entry: ImportEntry | null; re
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line !== "" && !line.startsWith("#") && !line.startsWith("```"))
-    .map((line) => ({ line, entry: fromLine(line) }));
+    .map((line) => ({ line, entry: fromLine(line, types) }));
 }
 
-export function parseImport(text: string): ImportResult {
+// types: the types an imported memory may have.
+export function parseImport(text: string, types: readonly string[]): ImportResult {
   const result: ImportResult = { entries: [], skipped: [] };
-  for (const { line, entry, reason } of candidates(text)) {
-    const problem = entry ? check(entry) : (reason ?? "not a memory");
+  for (const { line, entry, reason } of candidates(text, types)) {
+    const problem = entry ? check(entry, types) : (reason ?? "not a memory");
     if (problem || !entry) result.skipped.push({ line, reason: problem ?? "not a memory" });
     else if (result.entries.length >= MAX_IMPORT_ENTRIES) result.skipped.push({ line, reason: `more than ${MAX_IMPORT_ENTRIES} memories in one import` });
     else result.entries.push(entry);

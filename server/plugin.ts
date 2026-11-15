@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import { resolve } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
+  allowedTypes,
   approveProposalRpc,
   bodyLengthProblem,
   type BulkAction,
@@ -15,6 +16,7 @@ import {
   isFolderKey,
   listProposalsRpc,
   listReposRpc,
+  listTypesRpc,
   MAX_BULK_IDS,
   memoryHistoryRpc,
   memorySettings,
@@ -35,6 +37,7 @@ import {
   searchMemoriesRpc,
   setRepoPrefsRpc,
   tidyMemoryRpc,
+  typeProblem,
   updateMemoryRpc,
   type Where,
 } from "../shared/memory";
@@ -112,6 +115,8 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
     return memorySettings.schema.parse({});
   }
 
+  const currentTypes = async () => allowedTypes((await currentSettings()).customTypes);
+
   const runtime: Promise<Runtime> = (async () => {
     const root = await resolveRoot();
     const store = new MemoryStore(root, async () => (await currentSettings()).memoryMaxChars);
@@ -145,6 +150,7 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
       keys,
       expiryDays: async () => (await currentSettings()).expiryDays,
       includeGlobal: async (repoKey) => (await repoPrefs.get(repoKey)).includeGlobal,
+      types: currentTypes,
     });
     const receipts = new Receipts(root);
     const base = { root, store, tokens, search, usage, proposals, repoPrefs, keys, receipts, capture, stopInterop, port: mcpPort };
@@ -348,6 +354,8 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
   server.handle(saveMemoryRpc, async ({ where, scope, type, subject, body, paths, pinned, activation, enabled, until }) => {
     const [{ store }, repoKey] = await Promise.all([runtime, repoKeyOf(where)]);
     if (scope === "repo" && !repoKey) throw new Error("No project was chosen; save the memory as global instead.");
+    const problem = typeProblem(type, await currentTypes());
+    if (problem) throw new Error(problem);
     assertNoSecret(subject, body);
     const fact = await store.create({ scope, repoKey: scope === "repo" ? repoKey : null, type, subject, body, paths, pinned, activation, enabled, until, supersedes: null, source: BY_USER, citations: [] });
     return { fact };
@@ -358,11 +366,18 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
   server.handle(updateMemoryRpc, async ({ where, id, subject, body, type, paths, activation, enabled, until }) => {
     const [{ store }, repoKey] = await Promise.all([runtime, repoKeyOf(where)]);
     assertNoSecret(subject ?? "", body ?? "");
+    // A memory keeps a type that has left the list; only choosing a different one is checked.
+    if (type !== undefined && type !== (await store.get(id, repoKey)).type) {
+      const problem = typeProblem(type, await currentTypes());
+      if (problem) throw new Error(problem);
+    }
     const content = { ...(subject !== undefined && { subject }), ...(body !== undefined && { body }), ...(type !== undefined && { type }), ...(paths !== undefined && { paths }) };
     const controls = { ...(activation !== undefined && { activation }), ...(enabled !== undefined && { enabled }), ...(until !== undefined && { until }) };
     if (Object.keys(content).length === 0) return { fact: await store.setControls(id, repoKey, controls) };
     return { fact: await store.supersede(id, repoKey, { ...content, ...controls, source: BY_USER }) };
   });
+
+  server.handle(listTypesRpc, async () => ({ types: await currentTypes() }));
 
   server.handle(pinMemoryRpc, async ({ where, id, pinned }) => {
     const [{ store }, repoKey] = await Promise.all([runtime, repoKeyOf(where)]);
@@ -409,7 +424,7 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
   server.handle(importMemoryRpc, async ({ where, scope, text, dryRun }) => {
     const [{ store }, repoKey] = await Promise.all([runtime, repoKeyOf(where)]);
     if (scope === "repo" && !repoKey) throw new Error("No project was chosen; import the memories as global instead.");
-    const { entries, skipped } = parseImport(text);
+    const { entries, skipped } = parseImport(text, await currentTypes());
     const saved = new Set((await store.list(repoKey)).filter((fact) => fact.scope === scope && !fact.superseded).map((fact) => importKey(fact.subject, fact.body)));
     const seen = new Set<string>();
     const added: { type: MemoryType; subject: string }[] = [];
