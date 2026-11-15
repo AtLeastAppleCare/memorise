@@ -7,7 +7,14 @@ import { errorText } from "./copy";
 
 type NumberKey = "memoryMaxChars" | "indexMaxLines" | "expiryDays" | "mcpPort" | "captureIdleMinutes" | "captureMinUserMessages" | "captureMaxPerDay";
 type TextKey = "captureModel" | "captureInstructions" | "captureExclusions" | "tidyModel";
-type DraftKey = NumberKey | TextKey;
+type DraftKey = NumberKey | TextKey | "customTypes";
+
+const CUSTOM_TYPES = {
+  key: "customTypes" as const,
+  label: "Custom kinds",
+  hint: "Kinds of your own, next to Preference, Decision, Gotcha, How-to and Reference. Separate them with commas, such as eval-trap, runbook. Each is lowercase letters, digits and dashes, starting with a letter, up to 24 characters; up to 20 kinds. Agents and background runs may use these and no others. Removing a kind keeps the memories that have it.",
+};
+const listedTypes = (text: string) => text.split(",").map((type) => type.trim()).filter((type) => type !== "");
 
 // Main level: what most people change. Advanced: limits, timing, models, and the tools port.
 const ADVANCED_NUMBERS: ReadonlyArray<{ key: NumberKey; label: string; hint: string }> = [
@@ -66,10 +73,11 @@ export function MemorySettingsScreen({ theme }: PluginSurfaceProps) {
       const draft = drafts[key];
       if (draft !== undefined) next[key] = draft;
     }
+    if (drafts.customTypes !== undefined) next.customTypes = listedTypes(drafts.customTypes);
     // A number out of range is named with its label here, rather than refused later as raw validation output.
     const checked = memorySettings.schema.safeParse(next);
     if (!checked.success) {
-      setInputError(errorText(checked.error, Object.fromEntries([...ADVANCED_NUMBERS, ...ADVANCED_TEXTS].map(({ key, label }) => [key, `“${label}”`]))));
+      setInputError(errorText(checked.error, Object.fromEntries([...ADVANCED_NUMBERS, ...ADVANCED_TEXTS, CUSTOM_TYPES].map(({ key, label }) => [key, `“${label}”`]))));
       return;
     }
     setInputError(null);
@@ -80,7 +88,7 @@ export function MemorySettingsScreen({ theme }: PluginSurfaceProps) {
       key={key}
       label={label}
       hint={hint}
-      initialValue={String(settings.values[key])}
+      initialValue={key === "customTypes" ? settings.values.customTypes.join(", ") : String(settings.values[key])}
       disabled={settings.saving}
       onChangeText={(text) => setDrafts((current) => ({ ...current, [key]: text }))}
     />
@@ -176,6 +184,7 @@ export function MemorySettingsScreen({ theme }: PluginSurfaceProps) {
           />
         </SettingsCard>
         <SettingsCard>
+          {input(CUSTOM_TYPES)}
           {ADVANCED_NUMBERS.map(input)}
           {ADVANCED_TEXTS.map(input)}
           {saveAction}

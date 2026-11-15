@@ -1,16 +1,21 @@
-import { type Activation, DEFAULT_BODY_CHARS, type MemoryType, type Receipt } from "../shared/memory";
+import { type Activation, type BuiltinType, DEFAULT_BODY_CHARS, type Receipt } from "../shared/memory";
 
 // The words Memorise shows people, in one place. They name what the user gets, not how it works
 // (see docs/2026-10-25-0930_memorise-ux-copy_plan.md for the glossary). Stored values, RPCs, and
 // the agents' MCP tools keep their own names.
 
-export const KIND: Record<MemoryType, string> = {
+export const KIND: Record<BuiltinType, string> = {
   preference: "Preference",
   decision: "Decision",
   gotcha: "Gotcha",
   howto: "How-to",
   reference: "Reference",
 };
+
+// A built-in type's name in everyday words; a type of the user's own is shown as they wrote it.
+export function kindLabel(type: string): string {
+  return Object.hasOwn(KIND, type) ? KIND[type as BuiltinType] : type;
+}
 
 export const ACTIVATION: Record<Activation, { label: string; hint: string }> = {
   listed: { label: "Always", hint: "Listed for every new agent in this project." },

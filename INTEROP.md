@@ -35,6 +35,7 @@ One file per project, for example `export/github.com/acme/api.json`. The project
 }
 ```
 
+- `type` is a short lowercase label (letters, digits and dashes, up to 24 characters): `preference`, `decision`, `gotcha`, `howto`, `reference`, or a kind the user added. Treat it as text, not as one of a fixed set.
 - Project memories only; global memories are left out.
 - Current versions only; replaced versions are left out.
 - No memory text. An agent reads a memory's text with Memorise's own `memory_read` tool, so Memorise's rules on reading still apply.

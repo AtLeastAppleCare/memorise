@@ -8,7 +8,7 @@ import { ReceiptCard } from "./client/receipt-card";
 import { parseRemember, REMEMBER_HINT } from "./client/remember";
 import { MemorySettingsScreen } from "./client/settings-screen";
 import { MemoriseSidebarItem } from "./client/sidebar-item";
-import { listMemoriesRpc, PROPOSALS_CARD_KIND, proposalsCardSchema, RECEIPT_KIND, receiptSchema, saveMemoryRpc } from "./shared/memory";
+import { listMemoriesRpc, listTypesRpc, PROPOSALS_CARD_KIND, proposalsCardSchema, RECEIPT_KIND, receiptSchema, saveMemoryRpc } from "./shared/memory";
 
 export default function contribute(client: PluginClientContext) {
   const openManager = (repoKey: string | null) => client.openScreen({ screenId: "manager", params: repoKey ? { repo: repoKey } : {} });
@@ -53,7 +53,8 @@ export default function contribute(client: PluginClientContext) {
       argumentHint: REMEMBER_HINT,
       context: "workspace",
       async onSubmit({ args, workspace, rpc, openPanel }) {
-        await rpc(saveMemoryRpc, { where: { directory: workspace.directory }, ...parseRemember(args) });
+        const { types } = await rpc(listTypesRpc, {});
+        await rpc(saveMemoryRpc, { where: { directory: workspace.directory }, ...parseRemember(args, types) });
         memoryChanged();
         openPanel("memory");
       },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACTIVATION, count, errorText, KIND, lengthNote, projectDetail, pluginName, projectName, providerName, receiptText, relativeDate, shortDate, usageText } from "./copy";
+import { ACTIVATION, count, errorText, KIND, kindLabel, lengthNote, projectDetail, pluginName, projectName, providerName, receiptText, relativeDate, shortDate, usageText } from "./copy";
 
 // An RPC error as Paseo's client builds it: the handler's text, then requestType= and code=.
 function rpcError(text: string, requestType: string, code: string): Error {
@@ -91,6 +91,10 @@ describe("project names", () => {
 describe("glossary", () => {
   it("names every kind and every activation in everyday words", () => {
     expect(KIND).toEqual({ preference: "Preference", decision: "Decision", gotcha: "Gotcha", howto: "How-to", reference: "Reference" });
+    expect(kindLabel("howto")).toBe("How-to");
+    // A custom type is shown as the user wrote it, including one that names a property every object has.
+    expect(kindLabel("eval-trap")).toBe("eval-trap");
+    expect(kindLabel("constructor")).toBe("constructor");
     expect(Object.fromEntries(Object.entries(ACTIVATION).map(([key, { label }]) => [key, label]))).toEqual({
       listed: "Always",
       files: "When matching files change",

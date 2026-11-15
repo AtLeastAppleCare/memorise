@@ -8,7 +8,7 @@ import { onMemoryChanged } from "./memory-events";
 import { Badge, Button, type Styles } from "./panel-ui";
 import { moveFocus, reviewAction } from "./review-keys";
 import { keyboardAvailable, onKey, scrollIntoView } from "./web";
-import { count, errorText, KIND, pluginName, projectName, providerName, relativeDate } from "./copy";
+import { count, errorText, kindLabel, pluginName, projectName, providerName, relativeDate } from "./copy";
 
 type ListedProposal = z.infer<typeof listProposalsRpc.output>["proposals"][number];
 
@@ -67,7 +67,7 @@ function ProposalCard({ proposal, where, styles, onDone, focused, register }: { 
     <View ref={view} style={[styles.card, focused && { borderColor: styles.chipOn.borderColor, borderWidth: 2 }]} accessibilityState={{ selected: focused }}>
       <View style={styles.row}>
         <Text style={styles.body}>{KIND_LABEL[proposal.kind]}</Text>
-        <Badge label={KIND[proposal.type]} styles={styles} />
+        <Badge label={kindLabel(proposal.type)} styles={styles} />
       </View>
       <Text style={styles.muted}>{sourceText(proposal)}</Text>
       {proposal.reason ? <Text style={styles.muted}>Why: {proposal.reason}</Text> : null}

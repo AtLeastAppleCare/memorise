@@ -3,9 +3,9 @@ import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promise
 import { join } from "node:path";
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { type FactListItem, type MemorySettings, PROPOSALS_CARD_KIND, type RunStatus } from "../shared/memory";
+import { allowedTypes, type FactListItem, type MemorySettings, PROPOSALS_CARD_KIND, type RunStatus } from "../shared/memory";
 import { checkCitations } from "./citations";
-import { buildCapturePrompt, buildProjectPrompt, buildTidyPrompt, CAPTURE_OUTPUT_SCHEMA, parseCandidates, parseProjectReply, parseTidyActions, projectOutputSchema, type ScanMode, TIDY_OUTPUT_SCHEMA } from "./extractor";
+import { buildCapturePrompt, buildProjectPrompt, buildTidyPrompt, captureOutputSchema, parseCandidates, parseProjectReply, parseTidyActions, projectOutputSchema, type ScanMode, TIDY_OUTPUT_SCHEMA } from "./extractor";
 import type { PaseoApi } from "./paseo-types";
 import { type ProjectFile, readProjectFiles } from "./project-files";
 import type { ProjectKeys } from "./project-keys";
@@ -292,16 +292,17 @@ export class Capture {
     const facts = await this.deps.store.list(repoKey);
     const saved = facts.filter((fact) => fact.scope === "repo" && fact.status === "active" && !fact.superseded).slice(0, 200);
     const provider: Provider = values.tidyProvider;
+    const types = allowedTypes(values.customTypes);
     const reply = await runWorker(
       paseo,
       this.deps.root,
-      { provider, model: values.tidyModel, title: `memorise: project ${mode}`, prompt: buildProjectPrompt({ repoKey, mode, files, existing: saved }), outputSchema: projectOutputSchema(mode), timeoutMs: WORKER_TIMEOUT_MS, notify: values.notifyBackgroundRuns },
+      { provider, model: values.tidyModel, title: `memorise: project ${mode}`, prompt: buildProjectPrompt({ repoKey, mode, files, existing: saved, types }), outputSchema: projectOutputSchema(mode, types), timeoutMs: WORKER_TIMEOUT_MS, notify: values.notifyBackgroundRuns },
       (id) => this.trackWorker(id),
     );
     const byId = new Map(saved.map((fact) => [fact.id, fact]));
     let parsed: ReturnType<typeof parseProjectReply>;
     try {
-      parsed = parseProjectReply(extractJson(reply), mode, new Set(byId.keys()));
+      parsed = parseProjectReply(extractJson(reply), mode, new Set(byId.keys()), types);
     } catch (error) {
       throw new Error(`the worker's reply was not valid (${error instanceof Error ? error.message : String(error)}); nothing was suggested`);
     }
@@ -352,6 +353,7 @@ export class Capture {
       if (!(await this.takeRun(`capture for agent ${agent.id}`, values.captureMaxPerDay))) return 0;
       const facts = await this.deps.store.list(repoKey);
       const current = facts.filter((fact) => fact.status === "active" && !fact.superseded);
+      const types = allowedTypes(values.customTypes);
       const reply = await runWorker(
         paseo,
         this.deps.root,
@@ -359,8 +361,8 @@ export class Capture {
           provider,
           model,
           title: "memorise: capture",
-          prompt: buildCapturePrompt({ repoKey, transcript: slice.text, existingSubjects: current.map((fact) => fact.subject).slice(0, 100), instructions: values.captureInstructions, exclusions: values.captureExclusions }),
-          outputSchema: CAPTURE_OUTPUT_SCHEMA as unknown as Record<string, unknown>,
+          prompt: buildCapturePrompt({ repoKey, transcript: slice.text, existingSubjects: current.map((fact) => fact.subject).slice(0, 100), instructions: values.captureInstructions, exclusions: values.captureExclusions, types }),
+          outputSchema: captureOutputSchema(types),
           timeoutMs: WORKER_TIMEOUT_MS,
           notify: values.notifyBackgroundRuns,
         },
@@ -371,7 +373,7 @@ export class Capture {
       // the cursor moves past them.
       let candidates: ReturnType<typeof parseCandidates>;
       try {
-        candidates = parseCandidates(extractJson(reply));
+        candidates = parseCandidates(extractJson(reply), types);
       } catch (error) {
         await this.saveCursor(agent.id, cursor);
         console.error(`[memorise] capture for agent ${agent.id}: the worker's reply was not valid (${error instanceof Error ? error.message : String(error)}); these turns are skipped`);
@@ -464,9 +466,11 @@ export class Capture {
     }
     const source = { from: "tidy" as const, agentId: null, provider, model: values.tidyModel || null };
     const proposals = actions.map((action): NewProposal => {
-      if (action.action === "merge") return { repoKey, kind: "merge", targets: action.ids, type: action.type, subject: action.subject, body: action.body, paths: [], reason: action.reason, source };
-      const target = byId.get(action.id);
-      if (!target) throw new Error(`tidy named unknown fact ${action.id}`);
+      // For a merge, the first memory listed: the merged memory keeps its type (see approve in proposals.ts).
+      const id = action.action === "merge" ? action.ids[0] : action.id;
+      const target = byId.get(id);
+      if (!target) throw new Error(`tidy named unknown fact ${id}`);
+      if (action.action === "merge") return { repoKey, kind: "merge", targets: action.ids, type: target.type, subject: action.subject, body: action.body, paths: [], reason: action.reason, source };
       if (action.action === "replace") return { repoKey, kind: "replace", targets: [action.id], type: target.type, subject: action.subject, body: action.body, paths: target.paths, reason: action.reason, source };
       return { repoKey, kind: "retire", targets: [action.id], type: target.type, subject: target.subject, body: target.body, paths: target.paths, reason: action.reason, source };
     });

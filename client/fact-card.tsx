@@ -3,7 +3,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { Text, View } from "react-native";
 import { deleteMemoryRpc, memoryHistoryRpc, moveMemoryRpc, pinMemoryRpc, restoreMemoryRpc, retireMemoryRpc, revertMemoryRpc, updateMemoryRpc, type Where } from "../shared/memory";
-import { ACTIVATION, errorText, KIND, projectName, providerName, relativeDate, shortDate, usageText } from "./copy";
+import { ACTIVATION, errorText, kindLabel, projectName, providerName, relativeDate, shortDate, usageText } from "./copy";
 import { FactEditor } from "./fact-editor";
 import { isEnded, type ListedFact } from "./manager-view";
 import { memoryChanged } from "./memory-events";
@@ -25,7 +25,7 @@ function History({ fact, where, styles }: { fact: ListedFact; where: Where; styl
       {query.data.versions.map((version, index) => (
         <View key={version.id} style={[styles.card, { backgroundColor: "transparent" }]}>
           <Text style={styles.muted}>
-            {index === 0 ? "Current version" : `Version ${query.data.versions.length - index}`} · {KIND[version.type]} · {relativeDate(version.modified)}
+            {index === 0 ? "Current version" : `Version ${query.data.versions.length - index}`} · {kindLabel(version.type)} · {relativeDate(version.modified)}
           </Text>
           <Text style={styles.body}>
             {version.subject}: {version.body}
@@ -47,7 +47,7 @@ function History({ fact, where, styles }: { fact: ListedFact; where: Where; styl
 function badges(fact: ListedFact): string[] {
   const state = fact.superseded ? "Older version" : fact.status === "retired" ? "Archived" : null;
   return [
-    KIND[fact.type],
+    kindLabel(fact.type),
     fact.scope === "global" ? "Global" : null,
     fact.source.by === "auto" ? "Saved without review" : null,
     state,

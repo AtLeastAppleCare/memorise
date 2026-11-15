@@ -52,6 +52,11 @@ describe("the prompt list with the longest memories", () => {
 });
 
 describe("memory section", () => {
+  it("names memory_write's arguments, so an agent that reads only its prompt can call it", () => {
+    expect(buildMemorySection({ ...base, facts: [] }).text).toContain("save it with memory_write (arguments: type, subject, fact)");
+    expect(buildMemorySection({ ...base, toolsAvailable: false, facts: [] }).text).not.toContain("arguments:");
+  });
+
   it("is added once even when a parent prompt already carries one", () => {
     const parent = withMemorySection("Be brief.", buildMemorySection({ ...base, facts: [fact()] }).text);
     const child = withMemorySection(parent, buildMemorySection({ ...base, facts: [fact()] }).text);

@@ -39,7 +39,7 @@ Workers are archived when they finish, and leftovers from an interrupted run are
 
 ## Using it
 
-- `/remember [--global] [preference|decision|gotcha|howto|reference:] <fact>` in the composer saves a memory for the workspace's repository, or for all repositories with `--global`.
+- `/remember [--global] [kind:] <fact>` in the composer (the kind is `preference`, `decision`, `gotcha`, `howto`, `reference`, or a custom kind from settings) saves a memory for the workspace's repository, or for all repositories with `--global`.
 - The Memorise row in the sidebar opens Memorise for Global and every project: search, filters, sort, bulk actions with undo, a full editor, version history, project settings, suggestions across every project with approve all and reject all, clean-ups, suggestions from project files, import and export (Markdown or JSON), a "Needs attention" view of memories agents can't see or never use, and the plugin's settings.
 - The Memorise workspace panel lists the project's memories plus global ones, links to Memorise, and shows exactly what a new agent there would see, and why.
 - Each memory has settings only you set: when agents see it (always, when matching files change, title only, or only when searched), on or off, and an optional expiry date.

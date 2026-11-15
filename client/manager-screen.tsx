@@ -2,17 +2,18 @@ import { type PluginScreenProps, useRpc } from "@getpaseo/plugin/client";
 import { keepPreviousData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { type BulkAction, bulkMemoryRpc, isFolderKey, listMemoriesRpc, listProposalsRpc, listReposRpc, memoryTypeSchema, proposalsSummaryRpc, scanProjectRpc, searchMemoriesRpc, tidyMemoryRpc } from "../shared/memory";
+import { type BulkAction, bulkMemoryRpc, isFolderKey, listMemoriesRpc, listProposalsRpc, listReposRpc, proposalsSummaryRpc, scanProjectRpc, searchMemoriesRpc, tidyMemoryRpc } from "../shared/memory";
 import { FactCard } from "./fact-card";
 import { FactEditor } from "./fact-editor";
 import { Inbox } from "./inbox";
-import { activeFilters, applyFilters, ATTENTION, attentionGroups, type Control, CONTROL_LABEL, DEFAULT_FILTERS, type ListedFact, mergeScopes, shownSelection, SORT_LABEL, STATUS_LABEL, type ViewFilters } from "./manager-view";
+import { activeFilters, applyFilters, ATTENTION, attentionGroups, type Control, CONTROL_LABEL, DEFAULT_FILTERS, type ListedFact, mergeScopes, shownSelection, SORT_LABEL, STATUS_LABEL, typeChoices, type ViewFilters } from "./manager-view";
 import { memoryChanged, onMemoryChanged } from "./memory-events";
 import { announce } from "./notices";
 import { Button, Chip, NoticeBar, type Styles, useStyles } from "./panel-ui";
 import { RepoPrefsCard, TransferCard } from "./repo-tools";
 import { MemorySettingsScreen } from "./settings-screen";
-import { count, errorText, KIND, projectDetail, projectName, relativeDate } from "./copy";
+import { useAllowedTypes } from "./allowed-types";
+import { count, errorText, kindLabel, projectDetail, projectName, relativeDate } from "./copy";
 
 const GLOBAL = "global";
 const ATTENTION_VIEW = "attention";
@@ -39,7 +40,7 @@ function NavItem({ label, detail, on, onPress, styles }: { label: string; detail
   );
 }
 
-function FilterPanel({ filters, setFilters, searching, styles }: { filters: ViewFilters; setFilters(next: ViewFilters): void; searching: boolean; styles: Styles }) {
+function FilterPanel({ filters, setFilters, types, searching, styles }: { filters: ViewFilters; setFilters(next: ViewFilters): void; types: readonly string[]; searching: boolean; styles: Styles }) {
   const group = (title: string, chips: React.ReactNode) => (
     <View style={{ gap: 6 }}>
       <Text style={styles.label}>{title}</Text>
@@ -53,8 +54,9 @@ function FilterPanel({ filters, setFilters, searching, styles }: { filters: View
         (["current", "retired", "replaced", "all"] as const).map((value) => <Chip key={value} label={STATUS_LABEL[value]} on={filters.status === value} onPress={() => setFilters({ ...filters, status: value })} styles={styles} />),
       )}
       {group("Kind", [
-        <Chip key="any" label="Any" on={filters.type === "any"} onPress={() => setFilters({ ...filters, type: "any" })} styles={styles} />,
-        ...memoryTypeSchema.options.map((value) => <Chip key={value} label={KIND[value]} on={filters.type === value} onPress={() => setFilters({ ...filters, type: value })} styles={styles} />),
+        // The key has a space, which no type can have, so it never collides with a type's chip.
+        <Chip key="every type" label="Any" on={filters.type === null} onPress={() => setFilters({ ...filters, type: null })} styles={styles} />,
+        ...types.map((value) => <Chip key={value} label={kindLabel(value)} on={filters.type === value} onPress={() => setFilters({ ...filters, type: value })} styles={styles} />),
       ])}
       {group(
         "Visibility",
@@ -80,6 +82,7 @@ function MemoriesView({ repoKey, label, styles }: { repoKey: string | null; labe
   const bulk = useRpc(bulkMemoryRpc);
   const listProposals = useRpc(listProposalsRpc);
   const scan = useRpc(scanProjectRpc);
+  const allowed = useAllowedTypes();
   const where = useMemo(() => ({ repoKey }), [repoKey]);
   const scope = repoKey ? "repo" : "global";
   const [tab, setTab] = useState<"memories" | "proposed">("memories");
@@ -184,7 +187,7 @@ function MemoriesView({ repoKey, label, styles }: { repoKey: string | null; labe
               <Button label="Clear filters" styles={styles} onPress={() => setFilters(DEFAULT_FILTERS)} />
             </View>
           )}
-          {showFilters && <FilterPanel filters={filters} setFilters={setFilters} searching={trimmed !== ""} styles={styles} />}
+          {showFilters && <FilterPanel filters={filters} setFilters={setFilters} types={typeChoices(allowed, facts.data?.facts ?? [])} searching={trimmed !== ""} styles={styles} />}
           {found.error && <Text style={styles.danger}>{errorText(found.error)}</Text>}
           {selecting && (
             <View style={[styles.card, styles.row]}>
