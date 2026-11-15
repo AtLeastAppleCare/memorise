@@ -4,6 +4,24 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-15
+
+### Added
+
+- **Custom kinds** (Settings > Plugins > Memorise > Advanced). List kinds of your own, such as `eval-trap, runbook`, next to Preference, Decision, Gotcha, How-to and Reference. Agents (`memory_write`), background runs, the editor, imports and `/remember kind: fact` may use the built-in kinds and yours, and no others. An agent, a background run, the editor or a JSON import that names any other kind is refused (or, for an import, that entry is skipped) with the kinds allowed; in `/remember` and in a Markdown import, a prefix that is not one of your kinds stays part of the text, as before. Up to 20, each lowercase letters, digits and dashes, starting with a letter, up to 24 characters.
+- Removing a kind keeps the memories that have it. They show the kind as written, can be edited, restored to an older version, moved, and filtered by; a waiting suggestion with that kind can still be approved. Only choosing that kind for another memory is refused.
+
+### Changed
+
+- The `memory_write` tool's description and the memory section of each agent's prompt now name its arguments (`type`, `subject`, `fact`). An agent had called it with `kind`, `title` and `content` and was refused.
+- A clean-up no longer asks its worker for a merged memory's kind. A merge suggestion shows the kind of the first memory it lists, which is the kind the merged memory keeps.
+- The interop export's `type` (INTEROP.md) may now carry a custom kind. It was documented by example only; read it as text.
+- The settings version stays 2.
+
+### Going back to 0.12.1 or earlier
+
+Once a custom kind has been used, going back is not clean. Earlier releases skip every stored version whose kind is not one of the five, so an older version of the same memory shows as current again, and waiting suggestions with a custom kind are skipped. Before going back, delete each memory that has a custom kind anywhere in its history (More > Delete removes the whole history) and re-create it afterwards with a built-in kind. Earlier releases also ignore the custom kinds list and drop it the next time a setting is saved.
+
 ## [0.12.1] - 2026-11-11
 
 ### Fixed
