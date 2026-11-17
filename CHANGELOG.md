@@ -4,6 +4,15 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-11-17
+
+### Changed
+
+- **The suggestions card in a chat starts folded.** It shows one line with its count ("7 memories to review") and opens when you press that line. A new setting, "Open suggestion cards in chats" (Settings > Plugins > Memorise, off by default), makes cards start open. A card keeps the way it was made, so the setting applies to cards made from now on; cards already in chats start folded.
+- The card uses the full width of the chat again; the 760 px limit from 0.14.0 is gone.
+- The card's spacing is even: the same inner edge on all four sides, the same space above and below every line, and each suggestion's text starts directly under its title.
+- The settings version stays 2.
+
 ## [0.14.1] - 2026-11-17
 
 ### Fixed
