@@ -4,6 +4,8 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-17
+
 ### Changed
 
 - **The suggestions card in an agent's chat is easier to review from.** Each suggestion now shows its title, its kind, and the first line of its text; tap it to read all of it and the files it is about. Approve and Reject are buttons, and read "Approving" or "Rejecting" while they run, so a suggestion cannot be decided twice.
