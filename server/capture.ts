@@ -401,12 +401,13 @@ export class Capture {
       );
       await this.saveCursor(agent.id, cursor);
       // Settings are read again: the worker may have run for minutes, and the card follows the switch as it is now.
-      if (added.pending + added.autoSaved > 0 && (await this.deps.settings()).showInAgentChats) {
+      const settings = await this.deps.settings();
+      if (added.pending + added.autoSaved > 0 && settings.showInAgentChats) {
         // A card in the source agent's chat; the app renders it, the model never sees it. A new id per
         // card: Paseo refuses to fork from replies under a row that was replaced after them.
         await paseo.agents
           .ref(agent.id)
-          .timeline.append({ type: "plugin", id: `${PROPOSALS_CARD_KIND}:${randomUUID()}`, kind: PROPOSALS_CARD_KIND, version: 1, data: { count: added.pending, autoSaved: added.autoSaved, ids: added.pendingIds } })
+          .timeline.append({ type: "plugin", id: `${PROPOSALS_CARD_KIND}:${randomUUID()}`, kind: PROPOSALS_CARD_KIND, version: 1, data: { count: added.pending, autoSaved: added.autoSaved, ids: added.pendingIds, open: settings.openSuggestionCards } })
           .catch((error: unknown) => console.error(`[memorise] could not add the proposals card: ${String(error)}`));
       }
       return added.pending;

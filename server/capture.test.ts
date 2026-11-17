@@ -419,6 +419,20 @@ describe("capture", () => {
     expect(fake.appended[0]).toMatchObject({ kind: "memorise-proposals", data: { count: 1, autoSaved: 0, ids: [waiting[0].id] } });
   });
 
+  it("adds the chat card folded unless the setting says cards start open", async () => {
+    const closed = fakePaseo(conversation(5), reply);
+    capture.remember(closed.paseo);
+    expect(await capture.captureNow(agent)).toBe(1);
+    expect(closed.appended[0]).toMatchObject({ kind: "memorise-proposals", data: { count: 1, open: false } });
+
+    values = { ...values, openSuggestionCards: true };
+    const other = { ...agent, id: "agent-open" };
+    const opened = fakePaseo(conversation(5), JSON.stringify({ facts: [{ type: "howto", subject: "lint", body: "Lint runs with make lint before every commit.", paths: [] }] }));
+    capture.remember(opened.paseo);
+    expect(await capture.captureNow(other)).toBe(1);
+    expect(opened.appended[0]).toMatchObject({ kind: "memorise-proposals", data: { count: 1, open: true } });
+  });
+
   it("follows a repo's capture setting over the host setting", async () => {
     values = { ...values, captureEnabled: false };
     await repoPrefs.set(REPO, { enabled: true, includeGlobal: true, capture: "on" });

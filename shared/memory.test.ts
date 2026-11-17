@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { allowedTypes, BUILTIN_TYPES, MAX_CUSTOM_TYPES, memorySettings, memoryTypeSchema, typeProblem } from "./memory";
+import { allowedTypes, BUILTIN_TYPES, MAX_CUSTOM_TYPES, memorySettings, memoryTypeSchema, typeProblem, proposalsCardSchema } from "./memory";
 
 // The migration Paseo calls, so a test fails if it is ever left out of the definition.
 const migrate = (values: unknown, fromVersion: number) => {
@@ -35,6 +35,13 @@ describe("memory settings", () => {
     expect(memorySettings.schema.parse({}).showInAgentChats).toBe(false);
   });
 
+  it("starts suggestion cards folded by default, with no settings version raise, and a card without the field starts folded", () => {
+    expect(memorySettings.schema.parse({}).openSuggestionCards).toBe(false);
+    expect(memorySettings.version).toBe(2);
+    expect(proposalsCardSchema.parse({ count: 2, ids: ["a", "b"] }).open).toBe(false);
+    expect(proposalsCardSchema.parse({ count: 2, ids: ["a", "b"], open: true }).open).toBe(true);
+  });
+
   it("starts background runs without Paseo notifications by default, with no settings version raise", () => {
     expect(memorySettings.schema.parse({}).notifyBackgroundRuns).toBe(false);
     expect(memorySettings.version).toBe(2);
@@ -45,7 +52,7 @@ describe("memory settings", () => {
     // Paseo runs the migration, then the schema, and saves the result.
     const migrated = memorySettings.schema.parse(await migrate(savedByVersion1, 1));
     const { showMemoryUse: _dropped, ...kept } = savedByVersion1;
-    expect(migrated).toEqual({ ...kept, showInAgentChats: false, notifyBackgroundRuns: false, customTypes: [] });
+    expect(migrated).toEqual({ ...kept, showInAgentChats: false, openSuggestionCards: false, notifyBackgroundRuns: false, customTypes: [] });
   });
 
   it("refuses settings from a version it does not know", () => {

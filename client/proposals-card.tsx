@@ -13,21 +13,36 @@ type CardData = z.infer<typeof proposalsCardSchema>;
 type Listed = z.infer<typeof listProposalsRpc.output>["proposals"][number];
 type Decision = "approve" | "reject";
 
-// The card's box and top line. It is no wider than a comfortable line of text, so the buttons stay
-// near what they act on in a wide window.
-function Frame({ waiting, autoSaved, actions, styles, children }: { waiting: number; autoSaved: number; actions?: ReactNode; styles: Styles; children: ReactNode }) {
+// Spacing, in one place: the card's inner edge, the space above and below each line of the card,
+// and the width of the open-or-closed mark, which the lines under a title are indented by.
+const EDGE = 12;
+const LINE = 8;
+const MARK = 16;
+
+function Mark({ open, styles }: { open: boolean; styles: Styles }) {
+  return <Text style={[styles.muted, { width: MARK }]}>{open ? "▾" : "▸"}</Text>;
+}
+
+// The card's box and top line. Pressing the top line folds the card down to that line and opens it
+// again. Whether it starts open comes from the setting when the card was made.
+function Frame({ waiting, autoSaved, startOpen, actions, styles, children }: { waiting: number; autoSaved: number; startOpen: boolean; actions?: ReactNode; styles: Styles; children: ReactNode }) {
+  const [open, setOpen] = useState(startOpen);
   const heading = cardHeading(waiting, autoSaved);
   return (
-    <View style={{ borderWidth: 1, borderColor: styles.card.borderColor, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 8, maxWidth: 760 }}>
-      <View style={[styles.row, { paddingBottom: 8 }]}>
-        <Text style={[styles.muted, { flexGrow: 1, flexShrink: 1, flexBasis: 200 }]}>
-          <Text style={{ color: styles.body.color }}>{heading.lead}</Text>
-          {heading.rest}
-        </Text>
+    <View style={{ borderWidth: 1, borderColor: styles.card.borderColor, borderRadius: 10, padding: EDGE }}>
+      <View style={styles.row}>
+        {/* No label of its own, so a screen reader reads the count; `expanded` says which way it is. */}
+        <Pressable accessibilityRole="button" accessibilityState={{ expanded: open }} aria-expanded={open} onPress={() => setOpen((value) => !value)} style={{ flexDirection: "row", flexGrow: 1, flexShrink: 1, flexBasis: 200 }}>
+          <Mark open={open} styles={styles} />
+          <Text style={[styles.muted, { flexShrink: 1 }]}>
+            <Text style={{ color: styles.body.color }}>{heading.lead}</Text>
+            {heading.rest}
+          </Text>
+        </Pressable>
         {/* One group, so on a narrow screen the buttons move under the text together. */}
-        {actions && <View style={[styles.row, { flexShrink: 1 }]}>{actions}</View>}
+        {open && actions && <View style={[styles.row, { flexShrink: 1, paddingLeft: MARK }]}>{actions}</View>}
       </View>
-      {children}
+      {open && <View style={{ paddingTop: LINE }}>{children}</View>}
     </View>
   );
 }
@@ -38,7 +53,7 @@ function Suggestion({ proposal, styles, compact, running, locked, onDecide }: { 
   const [open, setOpen] = useState(false);
   const { subject, body, paths } = proposal;
   return (
-    <View style={{ borderTopWidth: 1, borderTopColor: styles.card.borderColor, paddingVertical: 6, gap: 6, flexDirection: compact ? "column" : "row", alignItems: compact ? "stretch" : "flex-start" }}>
+    <View style={{ borderTopWidth: 1, borderTopColor: styles.card.borderColor, paddingVertical: LINE, gap: LINE, flexDirection: compact ? "column" : "row", alignItems: compact ? "stretch" : "flex-start" }}>
       {/* No label of its own: a label would replace the title, kind, and text for a screen reader. */}
       <Pressable
         accessibilityRole="button"
@@ -47,19 +62,19 @@ function Suggestion({ proposal, styles, compact, running, locked, onDecide }: { 
         onPress={() => setOpen((value) => !value)}
         style={[{ gap: 2, minWidth: 0 }, !compact && { flex: 1 }]}
       >
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          <Text style={styles.muted}>{open ? "▾" : "▸"}</Text>
-          <Text style={[styles.body, { flexShrink: 1 }]} numberOfLines={open ? undefined : 1}>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Mark open={open} styles={styles} />
+          <Text style={[styles.body, { flexShrink: 1, marginRight: LINE }]} numberOfLines={open ? undefined : 1}>
             {subject}
           </Text>
           <Badge label={kindLabel(proposal.type)} styles={styles} />
         </View>
-        <Text style={[styles.muted, { paddingLeft: 16 }]} numberOfLines={open ? undefined : 1}>
+        <Text style={[styles.muted, { paddingLeft: MARK }]} numberOfLines={open ? undefined : 1}>
           {open ? body : oneLine(body)}
         </Text>
-        {open && paths.length > 0 && <Text style={[styles.muted, { paddingLeft: 16 }]}>About files: {paths.join(", ")}</Text>}
+        {open && paths.length > 0 && <Text style={[styles.muted, { paddingLeft: MARK }]}>About files: {paths.join(", ")}</Text>}
       </Pressable>
-      <View style={{ flexDirection: "row", gap: 8, paddingLeft: compact ? 16 : 0 }}>
+      <View style={{ flexDirection: "row", gap: LINE, paddingLeft: compact ? MARK : 0 }}>
         <Button label={running === "approve" ? "Approving" : "Approve"} accessibilityLabel={`Approve ${subject}`} tone="primary" disabled={locked} styles={styles} onPress={() => onDecide("approve")} />
         <Button label={running === "reject" ? "Rejecting" : "Reject"} accessibilityLabel={`Reject ${subject}`} disabled={locked} styles={styles} onPress={() => onDecide("reject")} />
       </View>
@@ -130,21 +145,21 @@ function Review({ agentId, workspaceId, data, styles, compact, openPanel }: { ag
     );
   const reviewed = mine ? reviewedText(data.ids, waitingIds) : null;
   return (
-    <Frame waiting={mine ? mine.length : data.count} autoSaved={data.autoSaved} actions={actions} styles={styles}>
-      {query.isPending && <Text style={styles.muted}>Loading suggestions</Text>}
-      {query.error && <Text style={styles.danger}>{errorText(query.error)}</Text>}
+    <Frame waiting={mine ? mine.length : data.count} autoSaved={data.autoSaved} startOpen={data.open} actions={actions} styles={styles}>
+      {query.isPending && <Text style={[styles.muted, { paddingLeft: MARK, paddingBottom: LINE }]}>Loading suggestions</Text>}
+      {query.error && <Text style={[styles.danger, { paddingLeft: MARK, paddingBottom: LINE }]}>{errorText(query.error)}</Text>}
       {mine?.map((proposal) => (
         <Suggestion key={proposal.id} proposal={proposal} styles={styles} compact={compact} running={running[proposal.id]} locked={Object.hasOwn(running, proposal.id)} onDecide={(decision) => void decide([proposal.id], decision)} />
       ))}
       {waitingIds
         .filter((id) => Object.hasOwn(failures, id))
         .map((id) => (
-          <Text key={id} style={[styles.danger, { paddingBottom: 6 }]}>
+          <Text key={id} style={[styles.danger, { paddingLeft: MARK, paddingBottom: LINE }]}>
             {failures[id]}
           </Text>
         ))}
-      <View style={[styles.row, { borderTopWidth: 1, borderTopColor: styles.card.borderColor, paddingTop: 8 }]}>
-        <Text style={[styles.muted, { flexGrow: 1, flexShrink: 1 }]}>{reviewed}</Text>
+      <View style={[styles.row, { borderTopWidth: 1, borderTopColor: styles.card.borderColor, paddingTop: LINE }]}>
+        <Text style={[styles.muted, { flexGrow: 1, flexShrink: 1, paddingLeft: MARK }]}>{reviewed}</Text>
         <Button label="Edit in Memorise" accessibilityLabel="Edit suggestions in the Memorise panel" styles={styles} onPress={() => openPanel(workspaceId)} />
       </View>
     </Frame>
@@ -157,8 +172,8 @@ export function ProposalsCard({ agentId, item, theme, layout, openPanel }: Plugi
   const workspaceId = useAgent(agentId, (agent) => agent.workspaceId);
   if (workspaceId) return <Review agentId={agentId} workspaceId={workspaceId} data={item.data} styles={styles} compact={layout.compact} openPanel={openPanel} />;
   return (
-    <Frame waiting={item.data.count} autoSaved={item.data.autoSaved} styles={styles}>
-      <Text style={styles.muted}>Review them in Memorise, under Suggestions.</Text>
+    <Frame waiting={item.data.count} autoSaved={item.data.autoSaved} startOpen={item.data.open} styles={styles}>
+      <Text style={[styles.muted, { paddingLeft: MARK }]}>Review them in Memorise, under Suggestions.</Text>
     </Frame>
   );
 }
