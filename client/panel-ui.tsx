@@ -50,10 +50,12 @@ export function Badge({ label, styles }: { label: string; styles: Styles }) {
   );
 }
 
-export function Button({ label, onPress, styles, tone, disabled = false }: { label: string; onPress(): void; styles: Styles; tone?: "danger"; disabled?: boolean }) {
+// `tone` "primary" fills the button with the accent colour, for the action a list is there for.
+export function Button({ label, onPress, styles, tone, disabled = false, accessibilityLabel = label }: { label: string; onPress(): void; styles: Styles; tone?: "danger" | "primary"; disabled?: boolean; accessibilityLabel?: string }) {
+  const primary = tone === "primary" && !disabled;
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={styles.button}>
-      <Text style={disabled ? styles.muted : tone === "danger" ? styles.danger : styles.chipText}>{label}</Text>
+    <Pressable accessibilityRole="button" accessibilityLabel={accessibilityLabel} accessibilityState={{ disabled }} disabled={disabled} onPress={onPress} style={primary ? [styles.button, { backgroundColor: styles.chipOn.backgroundColor }] : styles.button}>
+      <Text style={disabled ? styles.muted : tone === "danger" ? styles.danger : primary ? styles.chipTextOn : styles.chipText}>{label}</Text>
     </Pressable>
   );
 }

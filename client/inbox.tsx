@@ -6,6 +6,7 @@ import type { z } from "zod";
 import { approveProposalRpc, listProposalsRpc, memorySettings, rejectProposalRpc, scanProjectRpc, tidyMemoryRpc, type Where } from "../shared/memory";
 import { onMemoryChanged } from "./memory-events";
 import { Badge, Button, type Styles } from "./panel-ui";
+import { decideEach } from "./proposals-view";
 import { moveFocus, reviewAction } from "./review-keys";
 import { keyboardAvailable, onKey, scrollIntoView } from "./web";
 import { count, errorText, kindLabel, pluginName, projectName, providerName, relativeDate } from "./copy";
@@ -157,18 +158,7 @@ export function Inbox({ where, styles, onChanged, controls = true, keyboard = co
   });
   // Each proposal is applied on its own, so one that fails does not stop the rest; failures are listed.
   const decideAll = useMutation({
-    mutationFn: async ({ ids, approved }: { ids: string[]; approved: boolean }) => {
-      const failed: string[] = [];
-      for (const id of ids) {
-        try {
-          if (approved) await approve({ where, id });
-          else await reject({ where, id });
-        } catch (error) {
-          failed.push(errorText(error));
-        }
-      }
-      return failed;
-    },
+    mutationFn: ({ ids, approved }: { ids: string[]; approved: boolean }) => decideEach(ids, (id) => (approved ? approve({ where, id }) : reject({ where, id })), errorText),
     onSettled: () => {
       setConfirmAll(null);
       refresh();

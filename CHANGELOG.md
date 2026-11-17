@@ -4,6 +4,14 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+### Changed
+
+- **The suggestions card in an agent's chat is easier to review from.** Each suggestion now shows its title, its kind, and the first line of its text; tap it to read all of it and the files it is about. Approve and Reject are buttons, and read "Approving" or "Rejecting" while they run, so a suggestion cannot be decided twice.
+- The card has "Approve all" and "Reject all" when two or more suggestions wait. "Reject all" asks once first, because a rejected suggestion is not suggested again. If one fails, its message is shown and the others still go through.
+- The card's top line counts the memories still waiting, and its bottom line says how many are reviewed ("2 of 7 reviewed", then "All 7 reviewed."), wherever they were decided. "Edit in Memorise" is now a button at the bottom.
+- On a wide window the card is no wider than 760 px, so the buttons stay near the text. On a narrow screen the buttons sit under each suggestion.
+- No change to stored data, settings, or what agents see. The card is taller than before: about 425 px for 7 suggestions, up from about 230 px.
+
 ## [0.13.2] - 2026-11-15
 
 ### Changed
