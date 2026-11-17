@@ -20,6 +20,9 @@ const rejectedSchema = z.array(z.string().regex(/^[0-9a-f]{64}$/));
 export class ProposalStore {
   private queue: Promise<unknown> = Promise.resolve();
   private readonly dir: string;
+  // The time given to the last proposal added. No two proposals from this store share a time, so
+  // the time alone tells which was added first.
+  private lastCreated = 0;
 
   constructor(root: string) {
     this.dir = join(root, "proposals");
@@ -57,7 +60,9 @@ export class ProposalStore {
         console.error(`[memorise] skipped unreadable proposal ${join(dir, name)}: ${String(error)}`);
       }
     }
-    return proposals.sort((a, b) => a.created.localeCompare(b.created));
+    // Oldest first. Stored proposals that share a time (written by an older version, or after the
+    // clock stepped back) go by id, so the order never depends on how the folder lists its files.
+    return proposals.sort((a, b) => a.created.localeCompare(b.created) || a.id.localeCompare(b.id));
   }
 
   // Repos with proposals waiting and how many, in repo key order. Counted with list, so a file that
@@ -106,8 +111,11 @@ export class ProposalStore {
         if (skip.has(hash)) continue;
         try {
           assertNoSecret(candidate.subject, candidate.body);
-          const proposal = proposalSchema.parse({ ...candidate, id: newFactId(), created: new Date().toISOString(), hash });
+          // The clock has millisecond steps and a pass adds its proposals faster than that.
+          const created = Math.max(Date.now(), this.lastCreated + 1);
+          const proposal = proposalSchema.parse({ ...candidate, id: newFactId(), created: new Date(created).toISOString(), hash });
           await this.write(proposal);
+          this.lastCreated = created;
           skip.add(hash);
           added.push(proposal);
         } catch (error) {
