@@ -4,6 +4,10 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+### Fixed
+
+- Suggestions are always listed in the order they were made. Two made within the same millisecond, as a session's suggestions often are, could be listed in either order.
+
 ## [0.14.0] - 2026-11-17
 
 ### Changed
