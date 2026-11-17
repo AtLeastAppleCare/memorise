@@ -417,9 +417,10 @@ export const rejectProposalRpc = defineRpc({
 // The chat card a capture pass adds to the source agent's timeline (UI only; never sent to the model).
 export const PROPOSALS_CARD_KIND = "memorise-proposals";
 // count: proposals waiting; autoSaved: memories saved automatically (auto-approve on); ids: the
-// proposals this pass left waiting. Cards from before 0.10.4 have no ids and list every waiting
-// proposal from the agent.
-export const proposalsCardSchema = z.object({ count: z.number().int().min(0), autoSaved: z.number().int().min(0).default(0), ids: z.array(z.string()).optional() });
+// proposals this pass left waiting; open: whether the card starts open (the openSuggestionCards
+// setting when it was made). Cards from before 0.10.4 have no ids and list every waiting proposal
+// from the agent; cards from before 0.14.2 have no open and start folded.
+export const proposalsCardSchema = z.object({ count: z.number().int().min(0), autoSaved: z.number().int().min(0).default(0), ids: z.array(z.string()).optional(), open: z.boolean().default(false) });
 
 // A row in an agent's chat: how many memories its prompt listed, and how it used the memory tools
 // so far. Each update is a new row (see appendReceipt in server/plugin.ts).
@@ -500,6 +501,9 @@ export const memorySettings = defineSettings({
     // Rows in agents' chats: how many memories each agent was given and how it used them, and a card
     // when a session's suggestions are ready. Off until the user turns it on.
     showInAgentChats: z.boolean().default(false),
+    // Whether a suggestions card in a chat starts open, showing its suggestions, or folded to one
+    // line with its count. A card keeps the way it was made; this is for cards made from now on.
+    openSuggestionCards: z.boolean().default(false),
     // Paseo's notifications when Memorise's background runs (session suggestions, clean-ups, project
     // scans) finish or fail. Off: their workers are background agents, which Paseo never notifies about.
     notifyBackgroundRuns: z.boolean().default(false),

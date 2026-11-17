@@ -122,6 +122,13 @@ export function MemorySettingsScreen({ theme }: PluginSurfaceProps) {
             onValueChange={(showInAgentChats) => save({ ...settings.values, showInAgentChats })}
           />
           <SettingsSwitch
+            label="Open suggestion cards in chats"
+            hint="A card in a chat starts open, with its suggestions showing. Off: it starts as one line with its count, and opens when you press that line. Applies to cards made from now on."
+            value={settings.values.openSuggestionCards}
+            disabled={settings.saving || !settings.values.showInAgentChats}
+            onValueChange={(openSuggestionCards) => save({ ...settings.values, openSuggestionCards })}
+          />
+          <SettingsSwitch
             label="Notify when a background run finishes"
             hint="Paseo's notifications when Memorise's session suggestions, clean-ups, and project scans finish or fail. Off: they end quietly; their suggestions appear in the Suggestions tab, and a failed run shows on its status in Memorise."
             value={settings.values.notifyBackgroundRuns}
