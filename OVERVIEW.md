@@ -4,10 +4,12 @@ Memorise gives Claude, Codex, and OpenCode agents one shared memory. A fact lear
 
 Each memory is one short fact in its own Markdown file on the daemon host, under `plugin-data/memorise/` in your Paseo home. Repository memories are grouped by the repository's `origin` remote, so clones and worktrees share them. A clone whose origin uses an SSH host alias (such as `work-github:owner/repo`) is grouped under that alias, apart from clones that use the real host. A repository without an origin is grouped by its git folder, which its worktrees share. A folder outside git is a project of its own with the same features: it keeps its key when renamed or moved on the same disk, agents in a Paseo project's subfolders share the project's memories, files changed this week rank its memories, and citations are pinned to the file's content.
 
-When a supported agent is created, the plugin adds two things to it:
+At each interactive session opening, the plugin derives two independent features from current host support and your settings:
 
 - A short list of current memories in its system prompt, at most 150 lines and 8 KB. Memories you pinned come first (up to 20), then memories about files this worktree has changed, then global memories, then the rest of the repository's. The list says the entries are notes to verify, not instructions.
 - Two local MCP tool servers. `paseo-memorise` has `memory_search` (full-text search ranked by relevance, optionally limited to memories about given files) and `memory_read`. `paseo-memorise-write` has `memory_write`, `memory_update`, and `memory_retire`.
+
+When tools are unavailable, supported instructions keep a bounded read-only list. Unknown support omits the optional feature. Eligible tools return at the next supported opening without changing your preferences or memories. Saved endpoints and recognized saved notes are preserved and suppress conflicting new additions. See [Adaptive session features](README.md#adaptive-session-features) for explicit legacy adoption, credential lifetime, and fixed-binding close/reopen requirements.
 
 A memory about code can cite files by their path from the repository root, or name file globs such as `src/api/**`. The plugin records the commit at the time of citing. When a cited file has changed since then, the list marks that memory "needs check" so the agent verifies it first. Rewording a memory keeps its original citations; citing again records the current commit.
 
@@ -34,7 +36,7 @@ Workers are archived when they finish, and leftovers from an interrupted run are
 - Through the memory tools, agents write only to their own repository's memories. Global memories come only from you, through `/remember --global` or Memorise. The files themselves belong to your user account, so a program or agent with shell access running as you could still edit them directly. Saved text is always shown to agents as quoted notes: it cannot add lines to the list or end it.
 - Agents can replace or archive a memory (their tool is `memory_retire`) but never delete, pin, move, turn off, or set an expiry on one. A replaced memory is kept as an older version, and you can restore an archived one in Memorise.
 - Writes that look like they contain a secret (private keys, cloud and GitHub tokens, `password=` assignments, text inside `<private>` tags) are refused with the reason. Each repository allows at most 20 agent writes, replacements, and retirements per hour.
-- Reading memory is approved automatically; saving, changing, or retiring a memory asks you like any other tool, unless the agent runs in a mode that skips approvals (such as bypass or full access). You can turn automatic read approval off.
+- Optional exact read approval follows host support and your setting. Without it, ordinary provider prompts remain; Memorise does not answer them automatically. Saving, changing, or retiring a memory still asks unless the agent runs in a mode that skips approvals.
 - Every tool call is logged to `plugin-data/memorise/audit.jsonl` with time, repository, provider, tool, and memory id, but not the memory text. How often each memory was shown, read, and found is counted in `usage.jsonl` (ids only) and shown in the panel.
 
 ## Using it
@@ -48,9 +50,9 @@ Workers are archived when they finish, and leftovers from an interrupted run are
 
 ## Limits
 
-- Only agents created after the plugin is installed get memory. Running agents keep the prompt and tools they started with.
+- Features update on interactive opens, not during running turns. History-only opens add nothing.
 - Memory text is sent to each agent's model provider as part of its prompt.
 - Search matches words, not meaning. If the search index cannot be opened, keyword search is off and search by files still works.
 - Paseo does not replay events, so sessions that end while the plugin is stopped get no suggestions. A suggestion run that fails is retried at the next quiet spell, within the daily limit.
 - With OpenCode, the notes always reach the agent, but some models follow Code Mode's instruction to use only `execute` and skip the memory tools, which Paseo connects as ordinary tools. Asking the agent to list its tools, or using a model that calls ordinary tools, works around it.
-- Tested with Paseo 0.12.0 on macOS, with Claude, Codex, and OpenCode. Requires git on the daemon host (folders outside git work too).
+- This source requires a host advertising `adaptiveAgentFeatures`; a release version is not yet assigned. It stops with update guidance on older hosts. Requires git on the daemon host (folders outside git work too).

@@ -16,7 +16,7 @@ import type { UsageLog } from "./usage";
 import { hasEnded, isVisibleToAgents, orderForAgents } from "./visibility";
 import { PathMatcher } from "./work-files";
 
-// Distinctive names: read requests are approved by server name, so a user's own server must not share it.
+// Distinctive names for launch bindings and exact optional read grants. A saved name proves no ownership.
 export const READ_SERVER = "paseo-memorise";
 export const WRITE_SERVER = "paseo-memorise-write";
 const READ_PATH = "/mcp/read";

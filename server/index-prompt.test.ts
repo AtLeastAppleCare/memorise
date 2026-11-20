@@ -52,6 +52,20 @@ describe("the prompt list with the longest memories", () => {
 });
 
 describe("memory section", () => {
+  it("keeps title-only notes and overflow read-only when tools are unavailable", () => {
+    const section = buildMemorySection({ ...base, toolsAvailable: false, maxLines: 1, facts: [fact({ activation: "title", subject: "deploy" }), fact()] });
+    expect(section.text).toContain("deploy (title only)");
+    expect(section.text).toContain("1 more not shown here.");
+    expect(section.text).not.toMatch(/memory_(read|search|write|update|retire)/);
+    expect(Buffer.byteLength(section.text)).toBeLessThanOrEqual(INDEX_MAX_BYTES);
+  });
+
+  it("bounds read-only problem text even when a dependency returns an oversized error", () => {
+    const section = buildMemorySection({ ...base, toolsAvailable: false, facts: [fact()], problems: Array.from({ length: 20 }, () => "界".repeat(20_000)) });
+    expect(Buffer.byteLength(section.text)).toBeLessThanOrEqual(INDEX_MAX_BYTES);
+    expect(section.text).not.toMatch(/memory_(read|search|write|update|retire)/);
+  });
+
   it("names memory_write's arguments, so an agent that reads only its prompt can call it", () => {
     expect(buildMemorySection({ ...base, facts: [] }).text).toContain("save it with memory_write (arguments: type, subject, fact)");
     expect(buildMemorySection({ ...base, toolsAvailable: false, facts: [] }).text).not.toContain("arguments:");

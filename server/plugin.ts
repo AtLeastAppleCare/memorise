@@ -1,7 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Server } from "node:http";
-import { resolve } from "node:path";
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginServerContext, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import {
   allowedTypes,
   approveProposalRpc,
@@ -28,6 +27,7 @@ import {
   proposalsSummaryRpc,
   RECEIPT_KIND,
   type Receipt,
+  type RepoPrefsValue,
   rejectProposalRpc,
   restoreMemoryRpc,
   retireMemoryRpc,
@@ -43,14 +43,13 @@ import {
 } from "../shared/memory";
 import { Capture } from "./capture";
 import { checkCitations } from "./citations";
-import { buildMemorySection, INDEX_MAX_BYTES, withMemorySection, withoutMemorySection } from "./index-prompt";
+import { buildMemorySection, INDEX_MAX_BYTES, SECTION_END, SECTION_START } from "./index-prompt";
 import { MemoryMcp, mcpServerEntries, READ_SERVER, WRITE_SERVER } from "./mcp";
 import { loadTokenSecret, TokenAuthority } from "./mcp-auth";
 import { ProposalStore } from "./proposals";
 import { memoryToolUse, Receipts } from "./receipts";
 import type { PaseoApi } from "./paseo-types";
-import { supportedProvider } from "./providers";
-import { ProjectKeys } from "./project-keys";
+import { ProjectKeys, type Project } from "./project-keys";
 import { RepoPrefs } from "./repo-prefs";
 import { SearchIndex } from "./search-index";
 import { assertNoSecret } from "./secrets";
@@ -67,8 +66,6 @@ import { Interop } from "./interop";
 const CITATION_BUDGET_MS = 1_000;
 const PATH_MATCH_BUDGET_MS = 500;
 const BY_USER = { by: "user" as const, provider: null, branch: null, commit: null };
-// The permission requests Claude sends for the two tools of the read server (see buildReadServer).
-const READ_TOOL_REQUESTS = new Set(["memory_search", "memory_read"].map((tool) => `mcp__${READ_SERVER}__${tool}`));
 
 interface Runtime {
   root: string;
@@ -108,6 +105,12 @@ export async function mergeAliasKeys(store: MemoryStore, proposals: ProposalStor
 }
 
 export function contributeMemory(server: PluginServerContext, resolveRoot: () => Promise<string>) {
+  if (server.features?.adaptiveAgentFeatures !== true) throw new Error("Update the Paseo host to use Memorise adaptive agent features.");
+  server.registerLegacyAgentConfig({ version: 1, selectors: [
+    { id: "memory-read-server", group: "memory", label: "Memory read tools", kind: "mcp", name: READ_SERVER },
+    { id: "memory-write-server", group: "memory", label: "Memory write tools", kind: "mcp", name: WRITE_SERVER },
+    { id: "memory-instructions", group: "memory", label: "Saved memory notes and guidance", kind: "prompt-section", start: SECTION_START, end: SECTION_END },
+  ] });
   const settings = server.registerSettings(memorySettings);
 
   async function currentSettings(): Promise<MemorySettings> {
@@ -169,11 +172,11 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
   })();
   runtime.catch((error: unknown) => console.error(`[memorise] failed to start: ${String(error)}`));
 
-  // What a new agent in `cwd` gets, built the same way for the create hook and the preview. `off`
+  // What an opening agent in `cwd` gets, built the same way for the open hook and the preview. `off`
   // when the repo has memory turned off.
-  async function prepareMemory(cwd: string, values: MemorySettings) {
+  async function prepareMemory(cwd: string, values: MemorySettings, delivery?: { toolsAvailable: boolean; problems: string[] }) {
     const { store, repoPrefs, keys, mcpProblem } = await runtime;
-    const problems: string[] = mcpProblem ? [mcpProblem] : [];
+    const problems: string[] = [...(mcpProblem ? [mcpProblem] : []), ...(delivery?.problems ?? [])];
     const project = await keys.resolve(cwd).catch((error: unknown) => {
       problems.push(`repo memory is unavailable for this session (${String(error)})`);
       console.error(`[memorise] repo key for ${cwd} failed: ${String(error)}`);
@@ -201,8 +204,8 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
     if (paths.skipped) problems.push("ranking by changed files was cut short (time budget); some memories about those files may be listed lower");
     const visible = ranked.map(({ fact }) => fact);
     const notes = project ? await checkCitations({ cwd, root: project.root }, visible.filter((fact) => fact.scope === "repo"), CITATION_BUDGET_MS) : new Map<string, string>();
-    const section = buildMemorySection({ repoKey, facts: visible, notes, maxLines: values.indexMaxLines, toolsAvailable: mcpProblem === null, problems });
-    return { off: false as const, repoKey, section, ranked };
+    const section = buildMemorySection({ repoKey, facts: visible, notes, maxLines: values.indexMaxLines, toolsAvailable: mcpProblem === null && (delivery?.toolsAvailable ?? true), problems });
+    return { off: false as const, repoKey, project, prefs, section, ranked };
   }
 
   // Project roots are recorded from Paseo's workspaces before the first agent's memory is prepared,
@@ -218,10 +221,25 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
     return rootsKnown;
   }
 
-  // How many memories the last agent prepared in each folder was given, for its receipt. The count
-  // depends only on the folder, so agents created together in one folder share it.
-  const listedByFolder = new Map<string, { count: number; at: number }>();
-  const RECEIPT_MATCH_MS = 60_000;
+  const listedByAgent = new Map<string, { count: number; launchId: string }>();
+  // Compatibility metadata only. The host's previous contribution and retention own reuse authority.
+  const contributionSettings = new Map<string, { fingerprint: string; installed: boolean; hasBinding: boolean }>();
+  function settingsFingerprint(request: PluginSessionOpenRequest, values: MemorySettings, project: Project | null, prefs: RepoPrefsValue | null): string {
+    return createHash("sha256").update(JSON.stringify({
+      agentId: request.agentId,
+      provider: request.provider,
+      cwd: request.cwd,
+      project,
+      settings: Object.fromEntries(Object.entries(values).sort(([a], [b]) => a.localeCompare(b))),
+      prefs: prefs ? Object.fromEntries(Object.entries(prefs).sort(([a], [b]) => a.localeCompare(b))) : null,
+      adapter: request.openSupport?.adapter,
+      instructions: request.openSupport?.instructions === "supported",
+      http: request.openSupport?.mcpHttp === "supported",
+      exactApproval: request.openSupport?.exactMcpPreapproval === "supported",
+      promptState: request.legacyConfigState?.selectors["memory-instructions"] ?? "unknown",
+      occupied: Object.hasOwn(request.baseConfig?.mcpServers ?? {}, READ_SERVER) || Object.hasOwn(request.baseConfig?.mcpServers ?? {}, WRITE_SERVER),
+    })).digest("hex");
+  }
   // A new row per update, never a reused id: Paseo stretches a replaced row across every reply in
   // between and refuses to fork from those replies. Go back to one replaced row once Paseo's fork
   // check ignores plugin rows.
@@ -231,60 +249,104 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
       .timeline.append({ type: "plugin", id: `${RECEIPT_KIND}:${randomUUID()}`, kind: RECEIPT_KIND, version: 1, data: receipt })
       .catch((error: unknown) => console.error(`[memorise] could not show the memory receipt for agent ${agentId}: ${error instanceof Error ? error.message : String(error)}`));
 
-  server.before("agent.create", async ({ request }, { paseo }) => {
-    const { config } = request;
-    // Always drop what a parent agent passed down: a child may run in another repo.
-    const ownNames = new Set<string>([READ_SERVER, WRITE_SERVER]);
-    const otherServers = Object.fromEntries(Object.entries(config.mcpServers ?? {}).filter(([name]) => !ownNames.has(name)));
-    const stripped = { ...config, systemPrompt: withoutMemorySection(config.systemPrompt), mcpServers: otherServers };
-    const provider = supportedProvider(config.provider);
-    if (!provider) return { ...request, config: stripped };
-
-    // Memory enriches an agent; a memory failure (settings included) must not block agent creation,
-    // so it is reported to the agent in the section and to the plugin log instead.
+  server.addHook("agent.open.before", async ({ request }, { paseo, launch }) => {
+    if (request.purpose === "history") return;
+    const base = request.baseConfig;
+    if (!base || request.launchId !== launch.id) throw new Error("Update the Paseo host: Memorise requires projected agent configuration and a matching launch lifetime.");
+    const occupied = Object.hasOwn(base.mcpServers ?? {}, READ_SERVER) || Object.hasOwn(base.mcpServers ?? {}, WRITE_SERVER);
+    const fixed = request.openSupport?.restrictions.mcpConfiguration === "fixed";
+    const previous = request.previousContribution;
+    const prior = previous && contributionSettings.get(previous.launchId);
+    const reuseFixedBinding = fixed && (Object.keys(previous?.mcpServers ?? {}).length > 0 || prior?.hasBinding === true);
+    const instructions = request.openSupport?.instructions === "supported";
+    const promptState = request.legacyConfigState?.selectors["memory-instructions"];
+    const appendNotes = !occupied && instructions && promptState === "absent";
+    const http = request.openSupport?.mcpHttp === "supported" && request.openSupport.restrictions.mcpConfiguration === "mutable";
+    const deliveryProblems = http ? [] : ["memory tools are not available for this opening"];
+    let active: Runtime;
+    let values: MemorySettings;
+    let prepared: Awaited<ReturnType<typeof prepareMemory>>;
+    const rememberSettings = (fingerprint: string, hasBinding: boolean) => {
+      const entry = { fingerprint, hasBinding, installed: false };
+      contributionSettings.set(launch.id, entry);
+      launch.onInstalled(() => { entry.installed = true; });
+      launch.onDispose(() => { contributionSettings.delete(launch.id); });
+    };
     try {
-      const values = await currentSettings();
-      if (!values.enabled) return { ...request, config: stripped };
-      const { root, tokens, usage, capture, port, mcpProblem } = await runtime;
+      active = await runtime;
+      const { root, capture } = active;
       capture.remember(paseo);
-      // The plugin's own capture and tidy workers get no memory and no memory tools.
-      if (isWorkerRequest(root, config.cwd, request.env)) return { ...request, config: stripped };
+      if (request.openSupport) capture.observeProvider(request.agentId, request.provider, request.openSupport.adapter);
+      if (isWorkerRequest(root, request.cwd, request.env)) return;
+      if (reuseFixedBinding) {
+        const state = await settings.read();
+        if (!previous || !prior?.installed || !prior.hasBinding || state.status !== "ready" || !state.values.enabled || occupied) throw new Error("No compatible installed memory contribution");
+        await projectRootsKnown(paseo);
+        const project = await active.keys.resolve(request.cwd);
+        const prefs = await active.repoPrefs.get(project.key);
+        const fingerprint = settingsFingerprint(request, state.values, project, prefs);
+        if (!prefs.enabled || fingerprint !== prior.fingerprint || active.mcpProblem !== null || launch.signal.aborted) throw new Error("Memory settings, scope or feature eligibility changed");
+        const retained = launch.retainPrevious();
+        rememberSettings(fingerprint, true);
+        console.log(`[memorise] agent ${request.agentId} provider ${request.provider}: reusing retained memory contribution for fixed MCP configuration`);
+        return {
+          ...request,
+          mcpServers: { ...retained.mcpServers },
+          appendSystemPrompt: retained.appendSystemPrompt ? [...(request.appendSystemPrompt ?? []), ...retained.appendSystemPrompt] : request.appendSystemPrompt,
+          toolPolicy: retained.toolPolicy,
+          providerOptions: retained.providerOptions,
+          env: { ...retained.env, ...request.env },
+        };
+      }
+      // Saved names suppress the whole dependent group; they confer no credential or approval ownership.
+      if (occupied) {
+        console.log(`[memorise] agent ${request.agentId} provider ${request.provider}: memory uses saved configuration; adopt it explicitly before adaptive replacement`);
+        return;
+      }
+      if (promptState !== "absent") console.log(`[memorise] agent ${request.agentId} provider ${request.provider}: saved memory instructions ${promptState ?? "unknown"}; no duplicate guidance added`);
+      if (!http || !instructions) console.log(`[memorise] agent ${request.agentId} provider ${request.provider}: optional memory features limited (instructions=${request.openSupport?.instructions ?? "unknown"}, http=${request.openSupport?.mcpHttp ?? "unknown"}, configuration=${request.openSupport?.restrictions.mcpConfiguration ?? "unknown"})`);
+      if (!http && !appendNotes) return;
+      values = await currentSettings();
+      if (!values.enabled) return;
       await projectRootsKnown(paseo);
-      const prepared = await prepareMemory(config.cwd, values);
-      if (prepared.off) return { ...request, config: stripped };
-      const { repoKey, section } = prepared;
-      if (values.showInAgentChats) listedByFolder.set(resolve(config.cwd), { count: section.shownIds.length, at: Date.now() });
-      await usage.record("shown", section.shownIds).catch((error: unknown) => console.error(`[memorise] usage log write failed: ${String(error)}`));
-      const token = tokens.mint({ repoKey, cwd: config.cwd, provider });
-      return {
-        ...request,
-        config: {
-          ...stripped,
-          systemPrompt: withMemorySection(stripped.systemPrompt, section.text),
-          mcpServers: mcpProblem === null ? { ...otherServers, ...mcpServerEntries(port, token) } : otherServers,
-        },
-      };
+      prepared = await prepareMemory(request.cwd, values, { toolsAvailable: http, problems: deliveryProblems });
+      if (prepared.off) return;
     } catch (error) {
-      console.error(`[memorise] could not prepare memory for a ${provider} agent in ${config.cwd}: ${String(error)}`);
+      if (reuseFixedBinding) throw new Error(`Memorise cannot reuse this fixed memory contribution (${error instanceof Error ? error.message : String(error)}). Fully close this session and its retained children, then reopen it.`);
+      if (launch.signal.aborted) throw error;
+      console.error(`[memorise] could not prepare memory for agent ${request.agentId} provider ${request.provider}: ${String(error)}`);
+      if (!appendNotes) return;
       const section = buildMemorySection({ repoKey: null, facts: [], notes: new Map(), maxLines: 0, toolsAvailable: false, problems: [`memory could not be loaded (${String(error)})`] });
-      return { ...request, config: { ...stripped, systemPrompt: withMemorySection(stripped.systemPrompt, section.text) } };
+      return { ...request, appendSystemPrompt: [...(request.appendSystemPrompt ?? []), section.text] };
     }
+    if (launch.signal.aborted) throw new Error("Memorise session opening was disposed before memory preparation finished");
+    const { tokens, usage, port, mcpProblem } = active;
+    const { repoKey, section } = prepared;
+    const binding = http && mcpProblem === null ? tokens.mintLaunch({ repoKey, cwd: request.cwd, provider: request.provider, agentId: request.agentId }) : null;
+    if (binding) launch.onDispose(binding.dispose);
+    rememberSettings(settingsFingerprint(request, values, prepared.project, prepared.prefs), binding !== null);
+    if (appendNotes) {
+      if (values.showInAgentChats && request.reason === "create") {
+        listedByAgent.set(request.agentId, { count: section.shownIds.length, launchId: launch.id });
+        launch.onDispose(() => {
+          if (listedByAgent.get(request.agentId)?.launchId === launch.id) listedByAgent.delete(request.agentId);
+        });
+      }
+      await usage.record("shown", section.shownIds).catch((error: unknown) => console.error(`[memorise] usage log write failed: ${String(error)}`));
+    }
+    return {
+      ...request,
+      ...(appendNotes ? { appendSystemPrompt: [...(request.appendSystemPrompt ?? []), section.text] } : {}),
+      mcpServers: binding ? { ...request.mcpServers, ...mcpServerEntries(port, binding.token) } : request.mcpServers,
+      ...(binding && values.autoApproveReads && request.openSupport?.exactMcpPreapproval === "supported" ? { toolPolicy: { preapproved: [...(request.toolPolicy?.preapproved ?? []),
+        { kind: "mcp" as const, server: READ_SERVER, tool: "memory_search" },
+        { kind: "mcp" as const, server: READ_SERVER, tool: "memory_read" },
+      ] } } : {}),
+    };
   });
 
-  // Whether an agent of this provider in this folder is given the memory tools now: the conditions
-  // the create hook applies. Where it is not, a tool that carries the read server's name did not
-  // come from Memorise, so the permission hook must not approve it.
-  async function givesMemoryTools(provider: string, cwd: string): Promise<boolean> {
-    if (!supportedProvider(provider) || !(await currentSettings()).enabled) return false;
-    const { repoPrefs, keys, mcpProblem } = await runtime;
-    if (mcpProblem !== null) return false;
-    const repoKey = await keys.keyOf(cwd).catch(() => null);
-    return repoKey === null || (await repoPrefs.get(repoKey)).enabled;
-  }
-
-  // Reads are approved for the agent; writes still go to the user. Claude names the tool
-  // mcp__<server>__<tool>, and only the two read tools are approved; Codex only names the server.
-  // Every request from the plugin's own workers is denied: they only read the text they were given.
+  // Exact read conveniences travel only with this launch's own MCP bindings. Ordinary prompts
+  // remain unanswered. Workers still deny every request, including requests for built-in tools.
   server.on("agent.permission_requested", async ({ agent, request }, { paseo }) => {
     const { capture } = await runtime;
     capture.remember(paseo);
@@ -292,10 +354,6 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
       await paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "deny", message: "Memory workers may not use tools." } });
       return;
     }
-    const isRead = READ_TOOL_REQUESTS.has(request.name) || (request.name === "CodexMcpElicitation" && request.metadata?.serverName === READ_SERVER);
-    if (!isRead || !(await currentSettings()).autoApproveReads) return;
-    if (!(await givesMemoryTools(agent.provider, agent.cwd))) return;
-    await paseo.agents.ref(agent.id).respondToPermission({ requestId: request.id, response: { behavior: "allow" } });
   });
 
   // A new workspace's project is queued for a scan when automatic project scans are on and it is due.
@@ -321,8 +379,9 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
   server.on("agent.created", async ({ agent }, { paseo }) => {
     const { capture, receipts } = await runtime;
     capture.remember(paseo);
-    const listed = listedByFolder.get(resolve(agent.cwd));
-    if (!listed || Date.now() - listed.at > RECEIPT_MATCH_MS || capture.isWorker(agent.id, agent.cwd)) return;
+    const listed = listedByAgent.get(agent.id);
+    if (!listed || capture.isWorker(agent.id, agent.cwd)) return;
+    listedByAgent.delete(agent.id);
     if (!(await currentSettings()).showInAgentChats) return;
     // Counting starts where the timeline ends now, so nothing before the agent existed is its use.
     const receipt = await timelineEnd(paseo, agent.id)

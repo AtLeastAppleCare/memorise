@@ -48,7 +48,8 @@ export function isWorkerRequest(root: string, cwd: string, env: Record<string, s
 }
 
 export interface WorkerJob {
-  provider: Provider;
+  provider: string;
+  adapter?: Provider;
   model: string;
   title: string;
   prompt: string;
@@ -61,7 +62,7 @@ export interface WorkerJob {
 
 // The SDK needs "provider/model". A configured model is a model id as `paseo provider models <provider>`
 // lists it (OpenCode ids themselves contain a slash); with none, the provider's default model is used.
-export async function resolveModel(paseo: PaseoApi, provider: Provider, model: string): Promise<string> {
+export async function resolveModel(paseo: PaseoApi, provider: string, model: string): Promise<string> {
   if (model) return `${provider}/${model}`;
   const { models } = await paseo.providers.listModels(provider);
   const chosen = models?.find((candidate) => candidate.isDefault) ?? models?.[0];
@@ -99,16 +100,18 @@ export function workerWorkspace(paseo: PaseoApi, root: string): Promise<string> 
 // Runs one worker to completion in the hidden worker workspace and returns its final message. The
 // worker is archived afterwards whatever happens; the workspace stays.
 export async function runWorker(paseo: PaseoApi, root: string, job: WorkerJob, onCreated: (agentId: string) => void): Promise<string> {
+  const adapter = job.adapter ?? (Object.hasOwn(LOCKDOWN_OPTIONS, job.provider) ? job.provider as Provider : null);
+  if (!adapter) throw new Error(`Memorise has no verified worker lockdown for provider ${job.provider}`);
   const workspaceId = await workerWorkspace(paseo, root);
   let handle: Awaited<ReturnType<PaseoApi["agents"]["create"]>> | null = null;
   try {
     // Created through the workspace, so Paseo places the worker in it instead of making a new one.
     handle = await paseo.workspaces.ref(workspaceId).agents.create({
       title: job.title,
-      config: { provider: await resolveModel(paseo, job.provider, job.model), modeId: RESTRICTED_MODES[job.provider], options: LOCKDOWN_OPTIONS[job.provider], mcpServers: {} },
+      config: { provider: await resolveModel(paseo, job.provider, job.model), modeId: RESTRICTED_MODES[adapter], options: LOCKDOWN_OPTIONS[adapter], mcpServers: {} },
       env: { [WORKER_ENV]: WORKER_ROLE },
       prompt: job.prompt,
-      ...(job.provider === "opencode" ? {} : { outputSchema: job.outputSchema }),
+      ...(adapter === "opencode" ? {} : { outputSchema: job.outputSchema }),
       background: !job.notify,
     });
     onCreated(handle.id);

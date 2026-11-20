@@ -125,7 +125,7 @@ describe("capture", () => {
     keys = new ProjectKeys(root);
     capture = new Capture({ root, store, proposals, usage: new UsageLog(root), repoPrefs, keys, settings: async () => values });
     cwd = await repo();
-    agent = { id: "agent-1", workspaceId: "ws-a", parentAgentId: null, provider: "codex", cwd, title: null };
+    agent = { id: "agent-1", workspaceId: "ws-a", parentAgentId: null, provider: "codex", cwd, title: null, background: false, metadata: {} };
   });
   afterEach(() => {
     capture.stop();
@@ -616,6 +616,26 @@ describe("capture", () => {
     expect(fake.created[0].config).toMatchObject({ provider: "opencode/opencode/deepseek-v4.1-flash-free", modeId: "plan", options: { permission: "deny" } });
     // Deny-all also blocks Paseo's structured-output tool, so OpenCode gets no schema.
     expect(fake.created[0].outputSchema).toBeUndefined();
+  });
+
+  it("executes a same-session alias while selecting lockdown only from its resolved adapter", async () => {
+    const fake = fakePaseo(conversation(5), reply);
+    capture.remember(fake.paseo);
+    capture.observeProvider(agent.id, "work-alias", { kind: "builtin", id: "opencode" });
+    expect(await capture.captureNow({ ...agent, provider: "work-alias" })).toBe(1);
+    expect(fake.created[0].config).toMatchObject({ provider: "work-alias/work-alias-default", modeId: "plan", options: { permission: "deny" } });
+    expect(fake.created[0].outputSchema).toBeUndefined();
+    expect((await proposals.list(REPO))[0].source.provider).toBe("work-alias");
+  });
+
+  it("never reads an unsupported source through a fixed capture provider", async () => {
+    values = { ...values, captureProvider: "claude" };
+    const fake = fakePaseo(conversation(5), reply);
+    capture.remember(fake.paseo);
+    capture.observeProvider(agent.id, "unsupported-source", { kind: "acp" });
+    expect(await capture.captureNow({ ...agent, provider: "unsupported-source" })).toBe(0);
+    expect(fake.created).toEqual([]);
+    expect(await capture.runsToday()).toBe(0);
   });
 
   it("captures a session in a folder outside git into that folder's own memory", async () => {

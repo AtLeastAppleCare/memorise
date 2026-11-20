@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { PluginHookAgent } from "@getpaseo/plugin/server";
+import type { PluginHookAgent, PluginOpenSupport } from "@getpaseo/plugin/server";
 import { z } from "zod";
 import { allowedTypes, type FactListItem, type MemorySettings, PROPOSALS_CARD_KIND, type RunStatus } from "../shared/memory";
 import { checkCitations } from "./citations";
@@ -10,7 +10,7 @@ import type { PaseoApi } from "./paseo-types";
 import { type ProjectFile, readProjectFiles } from "./project-files";
 import type { ProjectKeys } from "./project-keys";
 import type { NewProposal, ProposalStore } from "./proposals";
-import { type Provider, supportedProvider } from "./providers";
+import { type Provider, supportedProvider, workerAdapter } from "./providers";
 import type { RepoPrefs } from "./repo-prefs";
 import type { MemoryStore } from "./store";
 import { readTimelineSince } from "./timeline";
@@ -64,6 +64,7 @@ export class Capture {
   // The last tidy or project scan started per repo, so its outcome reaches the inbox, not only the log.
   private readonly lastRuns = new Map<string, RunStatus>();
   private readonly workerIds = new Set<string>();
+  private readonly sourceProviders = new Map<string, { provider: string; adapter: Provider | null }>();
   private swept = false;
   private readonly statePath: string;
   private paseo: PaseoApi | null = null;
@@ -82,6 +83,15 @@ export class Capture {
 
   isWorker(agentId: string, cwd: string): boolean {
     return this.workerIds.has(agentId) || isWorkerCwd(this.deps.root, cwd);
+  }
+
+  observeProvider(agentId: string, provider: string, adapter: PluginOpenSupport["adapter"]): void {
+    this.sourceProviders.set(agentId, { provider, adapter: workerAdapter(adapter) });
+  }
+
+  private sourceAdapter(agent: PluginHookAgent): Provider | null {
+    const observed = this.sourceProviders.get(agent.id);
+    return observed?.provider === agent.provider ? observed.adapter : supportedProvider(agent.provider);
   }
 
   // Paseo hands the plugin one API object for its whole life; timers reuse the latest one seen. The
@@ -179,7 +189,7 @@ export class Capture {
 
   async onTurnEnded(agent: PluginHookAgent, paseo: PaseoApi): Promise<void> {
     this.remember(paseo);
-    if (this.isWorker(agent.id, agent.cwd) || !supportedProvider(agent.provider)) return;
+    if (this.isWorker(agent.id, agent.cwd) || !this.sourceAdapter(agent)) return;
     const values = await this.deps.settings();
     const repoKey = await this.deps.keys.keyOf(agent.cwd).catch(() => null);
     if (!repoKey || !(await this.captureOn(values, repoKey))) return;
@@ -336,10 +346,12 @@ export class Capture {
     this.running.add(agent.id);
     try {
       const values = await this.deps.settings();
-      const provider = values.captureProvider === "session" ? supportedProvider(agent.provider) : values.captureProvider;
+      const sourceAdapter = this.sourceAdapter(agent);
+      if (this.isWorker(agent.id, agent.cwd) || !sourceAdapter) return 0;
+      const provider = values.captureProvider === "session" ? agent.provider : values.captureProvider;
+      const adapter = values.captureProvider === "session" ? sourceAdapter : values.captureProvider;
       // A model id belongs to one provider, so it applies only when one provider reads every session.
       const model = values.captureProvider === "session" ? "" : values.captureModel;
-      if (!provider) return 0;
       const repoKey = await this.deps.keys.keyOf(agent.cwd).catch(() => null);
       // Captured memories belong to a repo; global memories come only from the user.
       if (!repoKey || !(await this.captureOn(values, repoKey))) return 0;
@@ -362,6 +374,7 @@ export class Capture {
         this.deps.root,
         {
           provider,
+          adapter,
           model,
           title: "memorise: capture",
           prompt: buildCapturePrompt({ repoKey, transcript: slice.text, existingSubjects: current.map((fact) => fact.subject).slice(0, 100), instructions: values.captureInstructions, exclusions: values.captureExclusions, types }),

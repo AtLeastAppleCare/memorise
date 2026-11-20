@@ -1,14 +1,16 @@
 import type { FactListItem } from "../shared/memory";
 import { READ_SERVER, WRITE_SERVER } from "./mcp";
 
-const SECTION_START = "<memorise>";
-const SECTION_END = "</memorise>";
+export const SECTION_START = "<memorise>";
+export const SECTION_END = "</memorise>";
 const SECTION = /\s*<memorise>[\s\S]*?<\/memorise>/g;
 export const INDEX_MAX_BYTES = 8_192;
 // Pinned facts are listed first but cannot crowd out everything else.
 export const PINNED_MAX_LINES = 20;
 export const PINNED_MAX_BYTES = 2_048;
 const LINE_BODY_CHARS = 160;
+const MAX_PROBLEMS = 4;
+const PROBLEM_CHARS = 250;
 
 // Paseo copies a parent agent's system prompt into child agents and schedules, so a prompt can
 // arrive with a section already in it.
@@ -39,12 +41,12 @@ function asLineText(text: string): string {
   return text.replace(/\s+/g, " ").replace(/</g, "&lt;").replace(/>/g, "&gt;").trim();
 }
 
-function factLine(fact: FactListItem, note: string | undefined): string {
+function factLine(fact: FactListItem, note: string | undefined, toolsAvailable: boolean): string {
   const body = asLineText(fact.body);
   const short = body.length > LINE_BODY_CHARS ? `${body.slice(0, LINE_BODY_CHARS - 1)}…` : body;
   const where = `${fact.scope === "global" ? " (global)" : ""}${fact.pinned ? " (pinned)" : ""}`;
   const by = fact.source.by === "user" ? "user" : asLineText(fact.source.provider ?? "agent");
-  const text = fact.activation === "title" && !fact.pinned ? " (title only; memory_read for details)" : `: ${short}`;
+  const text = fact.activation === "title" && !fact.pinned ? (toolsAvailable ? " (title only; memory_read for details)" : " (title only)") : `: ${short}`;
   return `- [${fact.id}] ${fact.type}${where}: ${asLineText(fact.subject)}${text} (${by}, ${fact.created.slice(0, 10)})${note ? ` [needs check: ${asLineText(note)}]` : ""}`;
 }
 
@@ -62,7 +64,7 @@ export function buildMemorySection({ repoKey, facts, notes, maxLines, toolsAvail
     toolsAvailable
       ? `Memory tools, called directly as tools: memory_search and memory_read (MCP server ${READ_SERVER}); memory_write, memory_update, memory_retire (MCP server ${WRITE_SERVER}). When you learn something durable about this project that its code and docs do not already say, save it with memory_write (arguments: type, subject, fact): one fact per call, no secrets, cite the files it is about. Fix a wrong note with memory_update and drop an obsolete one with memory_retire.`
       : "Memory tools are unavailable in this session; the notes below are read-only.",
-    ...problems.map((problem) => `Memory problem: ${asLineText(problem)}`),
+    ...problems.slice(0, MAX_PROBLEMS).map((problem) => `Memory problem: ${asLineText(problem).slice(0, PROBLEM_CHARS)}`),
   ];
   const footer = [SECTION_END];
   const lines: string[] = [];
@@ -72,7 +74,7 @@ export function buildMemorySection({ repoKey, facts, notes, maxLines, toolsAvail
   let pinnedBytes = 0;
   for (const fact of facts) {
     if (shownIds.length >= maxLines) break;
-    const line = factLine(fact, notes.get(fact.id));
+    const line = factLine(fact, notes.get(fact.id), toolsAvailable);
     const size = Buffer.byteLength(line) + 1;
     if (fact.pinned && (pinnedLines >= PINNED_MAX_LINES || pinnedBytes + size > PINNED_MAX_BYTES)) continue;
     if (bytes + size > INDEX_MAX_BYTES - 120) break;
@@ -85,6 +87,6 @@ export function buildMemorySection({ repoKey, facts, notes, maxLines, toolsAvail
     }
   }
   if (facts.length === 0 && problems.length === 0) lines.push("- (no notes saved yet)");
-  if (shownIds.length < facts.length) lines.push(`- ${facts.length - shownIds.length} more not shown here; find them with memory_search.`);
+  if (shownIds.length < facts.length) lines.push(`- ${facts.length - shownIds.length} more not shown here${toolsAvailable ? "; find them with memory_search" : ""}.`);
   return { text: [...header, ...lines, ...footer].join("\n"), shownIds };
 }

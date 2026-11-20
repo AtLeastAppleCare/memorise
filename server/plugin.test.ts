@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { statSync } from "node:fs";
-import { mkdir, readdir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
-import type { PluginServerContext } from "@getpaseo/plugin/server";
+import type { PluginServerContext, PluginSessionOpenContext, PluginSessionOpenRequest } from "@getpaseo/plugin/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type MemorySettings, memorySettings, updateMemoryRpc } from "../shared/memory";
 import { contributeMemory, mergeAliasKeys } from "./plugin";
@@ -10,17 +10,31 @@ import { ProjectKeys } from "./project-keys";
 import { ProposalStore } from "./proposals";
 import { folderKey } from "./repo-key";
 import { MemoryStore } from "./store";
+import { loadTokenSecret, TokenAuthority } from "./mcp-auth";
 import { tempDir } from "./test-temp-dir";
 
 type Handler = (...args: never[]) => unknown;
+const fullSupport: NonNullable<PluginSessionOpenRequest["openSupport"]> = {
+  adapter: { kind: "builtin", id: "claude" },
+  instructions: "supported",
+  mcpHttp: "supported",
+  exactMcpPreapproval: "supported",
+  attachedTools: { delivery: "mcp", enabled: true, disabledTools: [] },
+  restrictions: { mcpConfiguration: "mutable", processEnvironment: "mutable" },
+  providerOptions: [],
+};
 
 function fakeServer(values: MemorySettings, readSettings?: () => Promise<unknown>) {
   const before = new Map<string, Handler>();
   const on = new Map<string, Handler>();
   const rpc = new Map<string, Handler>();
+  const recipes: Parameters<PluginServerContext["registerLegacyAgentConfig"]>[0][] = [];
   const respondToPermission = vi.fn(async (_input: { requestId: string }) => undefined);
   const server = {
+    features: { adaptiveAgentFeatures: true },
+    registerLegacyAgentConfig: (recipe: Parameters<PluginServerContext["registerLegacyAgentConfig"]>[0]) => recipes.push(recipe),
     registerSettings: () => ({ read: readSettings ?? (async () => ({ status: "ready", revision: "1", values })), subscribe: () => () => undefined }),
+    addHook: (name: string, handler: Handler) => before.set(name, handler),
     before: (name: string, handler: Handler) => before.set(name, handler),
     on: (name: string, handler: Handler) => on.set(name, handler),
     handle: (contract: { name: string }, handler: Handler) => rpc.set(contract.name, handler),
@@ -33,6 +47,17 @@ function fakeServer(values: MemorySettings, readSettings?: () => Promise<unknown
   // Each agent's timeline, served only through refetch, as Paseo does: "after" a cursor, or the
   // most recent page for "tail".
   const timelines = new Map<string, unknown[]>();
+  let nextLaunch = 0;
+  const launches = new Map<string, { agentId: string; installed: boolean; users: number; released: boolean; controller: AbortController; disposals: ((outcome: { installed: boolean }) => void | Promise<void>)[] }>();
+  async function releaseLaunch(id: string): Promise<void> {
+    const lifetime = launches.get(id);
+    if (!lifetime) return;
+    lifetime.released = true;
+    if (lifetime.users > 0) return;
+    launches.delete(id);
+    lifetime.controller.abort();
+    await Promise.all(lifetime.disposals.map((dispose) => dispose({ installed: lifetime.installed })));
+  }
   const refetch = (agentId: string) => async (options: { direction?: string; cursor?: { seq: number }; limit?: number } = {}) => {
     const all = (timelines.get(agentId) ?? []).map((item, i) => ({ item, seqStart: i + 1, seqEnd: i + 1 }));
     const limit = options.limit ?? 200;
@@ -49,6 +74,8 @@ function fakeServer(values: MemorySettings, readSettings?: () => Promise<unknown
   };
   return {
     server,
+    before,
+    recipes,
     workspaces,
     respondToPermission,
     appended,
@@ -59,7 +86,47 @@ function fakeServer(values: MemorySettings, readSettings?: () => Promise<unknown
       timelines.set(id, [...(timelines.get(id) ?? []), ...items]);
       return (on.get("agent.turn_ended") as (event: unknown, context: unknown) => Promise<void>)({ agent: { id, cwd, provider: "claude", workspaceId: "ws-1", parentAgentId: null, title: null }, turnId: null, outcome: { kind: "completed" }, timeline: [] }, { paseo });
     },
-    create: (config: Record<string, unknown>, env?: Record<string, string>) => (before.get("agent.create") as (input: unknown, context: unknown) => Promise<{ config: Record<string, any> }>)({ request: { config, ...(env ? { env } : {}) } }, { paseo }),
+    open: async (config: Record<string, unknown>, env: Record<string, string> = {}, options: Partial<PluginSessionOpenRequest> = {}) => {
+      const launchId = options.launchId ?? `launch-${++nextLaunch}`;
+      const request: PluginSessionOpenRequest = { agentId: "agent-1", launchId, workspaceId: "ws-1", provider: config.provider as string, cwd: config.cwd as string, reason: "create", purpose: "interactive", title: null, background: false, labels: {}, metadata: {}, env, tools: [], mcpServers: {}, baseConfig: config as PluginSessionOpenRequest["baseConfig"], openSupport: fullSupport, legacyConfigState: { selectors: { "memory-instructions": "absent" } }, ...options };
+      const controller = new AbortController();
+      const lifetime = { agentId: request.agentId, installed: false, users: 0, released: false, controller, disposals: [] as ((outcome: { installed: boolean }) => void | Promise<void>)[] };
+      launches.set(launchId, lifetime);
+      const installations: (() => void | Promise<void>)[] = [];
+      const launch: PluginSessionOpenContext["launch"] = {
+        id: launchId, signal: controller.signal,
+        onDispose: (cleanup) => { lifetime.disposals.push(cleanup); },
+        onInstalled: (callback) => { installations.push(callback); },
+        retainPrevious: () => {
+          const previous = request.previousContribution;
+          const prior = previous && launches.get(previous.launchId);
+          if (!previous || !prior || !prior.installed || prior.agentId !== request.agentId || prior.controller.signal.aborted) throw new Error("No live owner-specific prior contribution");
+          prior.users += 1;
+          lifetime.disposals.push(async () => {
+            prior.users -= 1;
+            if (prior.released) await releaseLaunch(previous.launchId);
+          });
+          return previous;
+        },
+      };
+      let result: PluginSessionOpenRequest;
+      try {
+        result = await (before.get("agent.open.before") as (input: unknown, context: unknown) => Promise<PluginSessionOpenRequest | void>)({ request }, { paseo, signal: controller.signal, launch }) ?? request;
+      } catch (error) {
+        await releaseLaunch(launchId);
+        throw error;
+      }
+      const basePrompt = config.systemPrompt as string | undefined;
+      const append = result.appendSystemPrompt ?? [];
+      return {
+        request: result,
+        contribution: { launchId, mcpServers: result.mcpServers, appendSystemPrompt: result.appendSystemPrompt?.slice(options.appendSystemPrompt?.length ?? 0), toolPolicy: result.toolPolicy, providerOptions: result.providerOptions, env: Object.fromEntries(Object.entries(result.env).filter(([key, value]) => env[key] !== value)) },
+        config: { ...config, systemPrompt: [basePrompt, ...append].filter(Boolean).join("\n\n") || undefined, mcpServers: { ...((config.mcpServers as object | undefined) ?? {}), ...result.mcpServers } } as Record<string, any>,
+        signal: controller.signal,
+        install: async () => { lifetime.installed = true; await Promise.all(installations.map((callback) => callback())); },
+        dispose: () => releaseLaunch(launchId),
+      };
+    },
     call: (name: string, input: unknown) => (rpc.get(name) as (input: unknown, context: unknown) => Promise<any>)(input, { paseo }),
     workspaceCreated: (cwd: string) => (on.get("workspace.created") as (event: unknown, context: unknown) => Promise<void>)({ workspace: { id: "ws-1", projectId: "p-1", cwd, name: null, archivedAt: null } }, { paseo }),
     permission: (request: Record<string, unknown>, cwd = "/tmp", provider = "claude") => (on.get("agent.permission_requested") as (event: unknown, context: unknown) => Promise<void>)({ agent: { id: "agent-1", cwd, provider }, request }, { paseo }),
@@ -86,6 +153,7 @@ describe("memorise server entry", () => {
     // Reset after use: a test that never starts the plugin must not run the previous one's cleanup again.
     await cleanup();
     cleanup = () => undefined;
+    vi.restoreAllMocks();
   });
 
   function start(values: MemorySettings = defaults) {
@@ -93,6 +161,414 @@ describe("memorise server entry", () => {
     cleanup = contributeMemory(fake.server, async () => root) as () => unknown;
     return fake;
   }
+
+  it("rejects an old host before starting runtime work and registers one static legacy recipe", () => {
+    const old = fakeServer(defaults);
+    Object.assign(old.server, { features: undefined });
+    const resolveRoot = vi.fn(async () => root);
+    expect(() => contributeMemory(old.server, resolveRoot)).toThrow(/Update.*host.*adaptive/i);
+    expect(resolveRoot).not.toHaveBeenCalled();
+    const fake = start();
+    expect(fake.before.has("agent.create")).toBe(false);
+    expect(fake.recipes).toEqual([{ version: 1, selectors: [
+      { id: "memory-read-server", group: "memory", label: "Memory read tools", kind: "mcp", name: "paseo-memorise" },
+      { id: "memory-write-server", group: "memory", label: "Memory write tools", kind: "mcp", name: "paseo-memorise-write" },
+      { id: "memory-instructions", group: "memory", label: "Saved memory notes and guidance", kind: "prompt-section", start: "<memorise>", end: "</memorise>" },
+    ] }]);
+  });
+
+  it("restores supported features after a limited open without changing saved preferences or memories", async () => {
+    const fake = start();
+    const cwd = await repoWithOrigin("git@github.com:acme/api.git");
+    const where = { repoKey: "github.com/acme/api" };
+    await fake.call("memory.save", { where, scope: "repo", type: "howto", subject: "deploy", body: "Run make deploy.", activation: "title" });
+    await fake.call("memory.repo-prefs.set", { repoKey: where.repoKey, prefs: { includeGlobal: false } });
+    const prefs = await readFile(join(root, "repo-prefs.json"), "utf8");
+    const facts = await fake.call("memory.list", { where });
+    const base = { provider: "custom-alias", cwd };
+    const supported = await fake.open(base);
+    const limited = await fake.open(base, {}, { reason: "refresh", launchId: "limited", openSupport: { ...fullSupport, mcpHttp: "unknown", exactMcpPreapproval: "unknown" } });
+    const restored = await fake.open(base, {}, { reason: "resume", launchId: "restored" });
+    expect(Object.keys(supported.request.mcpServers)).toEqual(["paseo-memorise", "paseo-memorise-write"]);
+    expect(limited.request.mcpServers).toEqual({});
+    expect(limited.config.systemPrompt).toContain("read-only");
+    expect(limited.config.systemPrompt).not.toMatch(/memory_(read|search|write|update|retire)/);
+    expect(limited.request.toolPolicy).toBeUndefined();
+    expect(Object.keys(restored.request.mcpServers)).toEqual(["paseo-memorise", "paseo-memorise-write"]);
+    expect(restored.request.toolPolicy).toEqual({ preapproved: [
+      { kind: "mcp", server: "paseo-memorise", tool: "memory_search" },
+      { kind: "mcp", server: "paseo-memorise", tool: "memory_read" },
+    ] });
+    expect(await readFile(join(root, "repo-prefs.json"), "utf8")).toBe(prefs);
+    expect((await fake.call("memory.list", { where })).facts.map((fact: { body: string }) => fact.body)).toEqual(facts.facts.map((fact: { body: string }) => fact.body));
+    expect(base).toEqual({ provider: "custom-alias", cwd });
+  });
+
+  it("keeps tools without instructions or exact approval, and never answers normal prompts", async () => {
+    const fake = start();
+    const cwd = tempDir("plugin-plain-");
+    const opened = await fake.open({ provider: "custom-alias", cwd }, {}, { openSupport: { ...fullSupport, instructions: "unknown", exactMcpPreapproval: "unsupported" } });
+    expect(Object.keys(opened.request.mcpServers)).toEqual(["paseo-memorise", "paseo-memorise-write"]);
+    expect(opened.request.appendSystemPrompt).toBeUndefined();
+    expect(opened.request.toolPolicy).toBeUndefined();
+    await fake.permission({ id: "read", name: "mcp__paseo-memorise__memory_read" }, cwd, "custom-alias");
+    expect(fake.respondToPermission).not.toHaveBeenCalled();
+  });
+
+  it.each(["none", "unknown"] as const)("keeps only read-only notes when MCP configuration is %s", async (mcpConfiguration) => {
+    const fake = start();
+    const opened = await fake.open({ provider: "claude", cwd: tempDir("plugin-plain-") }, {}, { openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration } } });
+    expect(opened.request.mcpServers).toEqual({});
+    expect(opened.request.toolPolicy).toBeUndefined();
+    expect(opened.config.systemPrompt).toContain("read-only");
+    expect(opened.config.systemPrompt).not.toMatch(/memory_(read|search|write|update|retire)/);
+  });
+
+  it("treats absent support as unknown rather than guessing from the selected provider", async () => {
+    const fake = start();
+    const opened = await fake.open({ provider: "claude", cwd: tempDir("plugin-plain-") }, {}, { openSupport: undefined });
+    expect(opened.request.mcpServers).toEqual({});
+    expect(opened.request.appendSystemPrompt).toBeUndefined();
+    expect(opened.request.toolPolicy).toBeUndefined();
+  });
+
+  it("omits exact grants when automatic reads are disabled", async () => {
+    const fake = start({ ...defaults, autoApproveReads: false });
+    const opened = await fake.open({ provider: "claude", cwd: tempDir("plugin-plain-") });
+    expect(Object.keys(opened.request.mcpServers)).toHaveLength(2);
+    expect(opened.request.toolPolicy).toBeUndefined();
+  });
+
+  it.each(["unknown", "unsupported"] as const)("keeps tools and notes with ordinary prompts when exact approval is %s", async (exactMcpPreapproval) => {
+    const fake = start();
+    const opened = await fake.open({ provider: "claude", cwd: tempDir("plugin-plain-") }, {}, { openSupport: { ...fullSupport, exactMcpPreapproval } });
+    expect(Object.keys(opened.request.mcpServers)).toHaveLength(2);
+    expect(opened.config.systemPrompt).toContain("memory_search and memory_read");
+    expect(opened.request.toolPolicy).toBeUndefined();
+  });
+
+  it("suppresses the entire group for an occupied saved name without touching caller policy", async () => {
+    const fake = start();
+    const saved = { provider: "claude", cwd: tempDir("plugin-plain-"), systemPrompt: "Caller.", mcpServers: { "paseo-memorise-write": { type: "http", url: "http://caller.invalid/mcp" } }, toolPolicy: { preapproved: [{ kind: "mcp", server: "paseo-memorise-write", tool: "caller_tool" }] } };
+    const tokens = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const opened = await fake.open(saved);
+    expect(opened.config).toEqual(saved);
+    expect(opened.request.mcpServers).toEqual({});
+    expect(opened.request.toolPolicy).toBeUndefined();
+    expect(opened.request.appendSystemPrompt).toBeUndefined();
+    expect(tokens).not.toHaveBeenCalled();
+    tokens.mockRestore();
+  });
+
+  it.each(["present", "ambiguous"] as const)("suppresses fresh guidance for a %s saved prompt while allowing free endpoints", async (status) => {
+    const fake = start();
+    const saved = { provider: "claude", cwd: tempDir("plugin-plain-"), systemPrompt: "Caller.\n\n<memorise>saved</memorise>" };
+    const opened = await fake.open(saved, {}, { legacyConfigState: { selectors: { "memory-instructions": status } } });
+    expect(opened.config.systemPrompt).toBe(saved.systemPrompt);
+    expect(Object.keys(opened.request.mcpServers)).toHaveLength(2);
+    expect(opened.request.appendSystemPrompt).toBeUndefined();
+  });
+
+  it("allocates nothing for history or fixed openings without prior bindings", async () => {
+    const fake = start();
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const history = await fake.open(base, {}, { purpose: "history" });
+    expect(history.config).toEqual({ ...base, mcpServers: {} });
+    const fixed = await fake.open(base, {}, { openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.request.mcpServers).toEqual({});
+    expect(fixed.request.toolPolicy).toBeUndefined();
+    expect(fixed.config.systemPrompt).toContain("read-only");
+    expect(fixed.config.systemPrompt).not.toMatch(/memory_(read|search|write|update|retire)/);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("keeps an installed empty contribution empty when fixed memory remains Off", async () => {
+    const fake = start({ ...defaults, enabled: false });
+    const base = { provider: "work-alias", cwd: tempDir("plugin-plain-"), systemPrompt: "Caller." };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(base);
+    await first.install();
+    const fixed = await fake.open(base, {}, { reason: "refresh", previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.config).toEqual({ ...base, mcpServers: {} });
+    expect(fixed.request.mcpServers).toEqual({});
+    expect(fixed.request.appendSystemPrompt).toBeUndefined();
+    expect(fixed.request.toolPolicy).toBeUndefined();
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("keeps an installed limited contribution empty on a fixed opening without HTTP or instructions", async () => {
+    const fake = start();
+    const base = { provider: "work-alias", cwd: tempDir("plugin-plain-"), systemPrompt: "Caller." };
+    const limitedSupport = { ...fullSupport, instructions: "unsupported" as const, mcpHttp: "unsupported" as const };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(base, {}, { openSupport: limitedSupport });
+    await first.install();
+    const fixed = await fake.open(base, {}, { reason: "refresh", previousContribution: first.contribution, openSupport: { ...limitedSupport, restrictions: { ...limitedSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.config).toEqual({ ...base, mcpServers: {} });
+    expect(fixed.request.mcpServers).toEqual({});
+    expect(fixed.request.appendSystemPrompt).toBeUndefined();
+    expect(fixed.request.toolPolicy).toBeUndefined();
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("preserves saved caller names and suppresses new memory on a fixed opening without an owned binding", async () => {
+    const fake = start();
+    const saved = { provider: "work-alias", cwd: tempDir("plugin-plain-"), systemPrompt: "Caller.\n\n<memorise>saved</memorise>", mcpServers: { "paseo-memorise-write": { type: "http", url: "http://caller.invalid/mcp" } }, toolPolicy: { preapproved: [{ kind: "mcp", server: "paseo-memorise-write", tool: "caller_tool" }] } };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(saved);
+    await first.install();
+    const fixed = await fake.open(saved, {}, { reason: "refresh", previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.config).toEqual(saved);
+    expect(fixed.request.mcpServers).toEqual({});
+    expect(fixed.request.appendSystemPrompt).toBeUndefined();
+    expect(fixed.request.toolPolicy).toBeUndefined();
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("derives newly eligible fixed notes without tools or excluded global memories after an empty opening", async () => {
+    const fake = start();
+    const cwd = await repoWithOrigin("git@github.com:acme/api.git");
+    const where = { repoKey: "github.com/acme/api" };
+    await fake.call("memory.save", { where, scope: "repo", type: "howto", subject: "repo build", body: "Run make build." });
+    await fake.call("memory.save", { where, scope: "global", type: "preference", subject: "global style", body: "Use global style." });
+    await fake.call("memory.repo-prefs.set", { repoKey: where.repoKey, prefs: { includeGlobal: false } });
+    const base = { provider: "work-alias", cwd };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(base, {}, { openSupport: { ...fullSupport, instructions: "unsupported", mcpHttp: "unsupported" } });
+    await first.install();
+    const fixed = await fake.open(base, {}, { reason: "refresh", previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.request.mcpServers).toEqual({});
+    expect(fixed.request.toolPolicy).toBeUndefined();
+    expect(fixed.config.systemPrompt).toContain("repo build: Run make build.");
+    expect(fixed.config.systemPrompt).not.toContain("global style");
+    expect(fixed.config.systemPrompt).toContain("read-only");
+    expect(fixed.config.systemPrompt).not.toMatch(/memory_(read|search|write|update|retire)/);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("keeps fixed notes read-only after an installed notes-only contribution", async () => {
+    const fake = start();
+    const base = { provider: "work-alias", cwd: tempDir("plugin-plain-") };
+    const limitedSupport = { ...fullSupport, mcpHttp: "unsupported" as const };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(base, {}, { openSupport: limitedSupport });
+    await first.install();
+    expect(first.request.mcpServers).toEqual({});
+    expect(first.config.systemPrompt).toContain("read-only");
+    const fixed = await fake.open(base, {}, { reason: "refresh", previousContribution: first.contribution, openSupport: { ...limitedSupport, restrictions: { ...limitedSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.request.mcpServers).toEqual({});
+    expect(fixed.request.toolPolicy).toBeUndefined();
+    expect(fixed.config.systemPrompt).toContain("read-only");
+    expect(fixed.config.systemPrompt).not.toMatch(/memory_(read|search|write|update|retire)/);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("reports a fixed notes loading problem without full-close guidance when no owned binding exists", async () => {
+    let unavailable = false;
+    const fake = fakeServer(defaults, async () => {
+      if (unavailable) throw new Error("settings store offline");
+      return { status: "ready", revision: "1", values: defaults };
+    });
+    cleanup = contributeMemory(fake.server, async () => root) as () => unknown;
+    const base = { provider: "work-alias", cwd: tempDir("plugin-plain-") };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(base, {}, { openSupport: { ...fullSupport, instructions: "unsupported", mcpHttp: "unsupported" } });
+    await first.install();
+    unavailable = true;
+    const fixed = await fake.open(base, {}, { reason: "refresh", previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.request.mcpServers).toEqual({});
+    expect(fixed.request.toolPolicy).toBeUndefined();
+    expect(fixed.config.systemPrompt).toContain("memory could not be loaded (Error: settings store offline)");
+    expect(fixed.config.systemPrompt).not.toMatch(/fully close|reopen|memory_(read|search|write|update|retire)/i);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("reuses the exact installed own contribution for compatible fixed openings without minting a credential", async () => {
+    const fake = start();
+    const base = { provider: "work-alias", cwd: tempDir("plugin-plain-") };
+    const first = await fake.open(base, { CALLER_ENV: "old" });
+    await first.install();
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const fixed = await fake.open(base, { CALLER_ENV: "current" }, { reason: "refresh", previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.request.mcpServers).toEqual(first.request.mcpServers);
+    expect(fixed.request.toolPolicy).toEqual(first.request.toolPolicy);
+    expect(fixed.request.appendSystemPrompt).toEqual(first.request.appendSystemPrompt);
+    expect(fixed.request.providerOptions).toEqual(first.request.providerOptions);
+    expect(fixed.request.env).toEqual({ CALLER_ENV: "current" });
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("preserves the current incoming instruction prefix before its own retained fixed instructions", async () => {
+    const fake = start();
+    const base = { provider: "work-alias", cwd: tempDir("plugin-plain-"), systemPrompt: "Caller." };
+    const first = await fake.open(base, {}, { appendSystemPrompt: ["Earlier plugin on create."] });
+    await first.install();
+    expect(first.contribution.appendSystemPrompt).toHaveLength(1);
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const fixed = await fake.open(base, {}, { reason: "refresh", appendSystemPrompt: ["Earlier plugin on refresh."], previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } });
+    expect(fixed.request.appendSystemPrompt?.[0]).toBe("Earlier plugin on refresh.");
+    expect(fixed.request.appendSystemPrompt).toHaveLength(2);
+    expect(fixed.contribution.appendSystemPrompt).toEqual(first.contribution.appendSystemPrompt);
+    expect(fixed.config.systemPrompt).not.toContain("Earlier plugin on create.");
+    expect(fixed.request.mcpServers).toEqual(first.request.mcpServers);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it.each([{ autoApproveReads: false }, { enabled: false }, { indexMaxLines: 0 }])("refuses fixed reuse after settings change to %j before allocation", async (change) => {
+    let values = { ...defaults };
+    const fake = fakeServer(defaults, async () => ({ status: "ready", revision: "1", values }));
+    cleanup = contributeMemory(fake.server, async () => root) as () => unknown;
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const first = await fake.open(base);
+    await first.install();
+    values = { ...values, ...change };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    await expect(fake.open(base, {}, { previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } })).rejects.toThrow(/fully close.*reopen/i);
+    expect(minted).not.toHaveBeenCalled();
+    expect(first.signal.aborted).toBe(false);
+  });
+
+  it.each([{ includeGlobal: false }, { enabled: false }])("refuses fixed reuse after project preferences change to %j", async (prefs) => {
+    const fake = start();
+    const base = { provider: "claude", cwd: await repoWithOrigin("git@github.com:acme/api.git") };
+    const first = await fake.open(base);
+    await first.install();
+    await fake.call("memory.repo-prefs.set", { repoKey: "github.com/acme/api", prefs });
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    await expect(fake.open(base, {}, { previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } })).rejects.toThrow(/fully close.*reopen/i);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("keeps a retained credential alive after prior release and through chained fixed openings", async () => {
+    const fake = start();
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(base);
+    await first.install();
+    const fixedSupport = { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" as const } };
+    const second = await fake.open(base, {}, { previousContribution: first.contribution, openSupport: fixedSupport });
+    await second.install();
+    await first.dispose();
+    const authority = minted.mock.contexts[0] as TokenAuthority;
+    const authorization = first.config.mcpServers["paseo-memorise"].headers.Authorization;
+    expect(first.signal.aborted).toBe(false);
+    expect(authority.verify(authorization)?.agentId).toBe("agent-1");
+    const third = await fake.open(base, {}, { previousContribution: second.contribution, openSupport: fixedSupport });
+    await third.install();
+    await second.dispose();
+    expect(authority.verify(authorization)?.agentId).toBe("agent-1");
+    await third.dispose();
+    expect(authority.verify(authorization)).toBeNull();
+    expect(first.signal.aborted).toBe(true);
+  });
+
+  it("rejects provisional or disposed prior contributions and changed prompt eligibility", async () => {
+    const fake = start();
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const first = await fake.open(base);
+    const fixedSupport = { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" as const } };
+    await expect(fake.open(base, {}, { previousContribution: first.contribution, openSupport: fixedSupport })).rejects.toThrow(/fully close.*reopen/i);
+    await first.install();
+    await expect(fake.open(base, {}, { previousContribution: first.contribution, openSupport: fixedSupport, legacyConfigState: { selectors: { "memory-instructions": "present" } } })).rejects.toThrow(/fully close.*reopen/i);
+    await first.dispose();
+    await expect(fake.open(base, {}, { previousContribution: first.contribution, openSupport: fixedSupport })).rejects.toThrow(/fully close.*reopen/i);
+  });
+
+  it("releases only a failed replacement's retention while its prior launch stays usable", async () => {
+    const fake = start();
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open(base);
+    await first.install();
+    const fixedSupport = { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" as const } };
+    const provisional = await fake.open(base, {}, { previousContribution: first.contribution, openSupport: fixedSupport });
+    await provisional.dispose();
+    const authority = minted.mock.contexts[0] as TokenAuthority;
+    const authorization = first.config.mcpServers["paseo-memorise"].headers.Authorization;
+    expect(authority.verify(authorization)?.agentId).toBe("agent-1");
+    expect(first.signal.aborted).toBe(false);
+    const retry = await fake.open(base, {}, { previousContribution: first.contribution, openSupport: fixedSupport });
+    await retry.install();
+    expect(retry.request.mcpServers).toEqual(first.request.mcpServers);
+    await retry.dispose();
+    await first.dispose();
+    expect(authority.verify(authorization)).toBeNull();
+  });
+
+  it("refuses fixed reuse after a plugin restart even when a prior snapshot is supplied", async () => {
+    const fake = start();
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const first = await fake.open(base);
+    await first.install();
+    await cleanup();
+    const restarted = start();
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    await expect(restarted.open(base, {}, { previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } })).rejects.toThrow(/fully close.*reopen/i);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("refuses fixed reuse when the current folder resolves to another project", async () => {
+    const fake = start();
+    const cwd = await repoWithOrigin("git@github.com:acme/api.git");
+    const base = { provider: "claude", cwd };
+    const first = await fake.open(base);
+    await first.install();
+    execFileSync("git", ["-C", cwd, "remote", "set-url", "origin", "git@github.com:acme/web.git"]);
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    await expect(fake.open(base, {}, { previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } })).rejects.toThrow(/fully close.*reopen/i);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it.each([{ instructions: "unsupported" as const }, { exactMcpPreapproval: "unknown" as const }, { mcpHttp: "unsupported" as const }])("refuses fixed reuse when current feature eligibility changes to %j", async (support) => {
+    const fake = start();
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const first = await fake.open(base);
+    await first.install();
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    await expect(fake.open(base, {}, { previousContribution: first.contribution, openSupport: { ...fullSupport, ...support, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } })).rejects.toThrow(/fully close.*reopen/i);
+    expect(minted).not.toHaveBeenCalled();
+  });
+
+  it("never reuses another agent's matching-settings prior contribution", async () => {
+    const fake = start();
+    const base = { provider: "claude", cwd: tempDir("plugin-plain-") };
+    const first = await fake.open(base, {}, { agentId: "owner" });
+    await first.install();
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    await expect(fake.open(base, {}, { agentId: "outsider", previousContribution: first.contribution, openSupport: { ...fullSupport, restrictions: { ...fullSupport.restrictions, mcpConfiguration: "fixed" } } })).rejects.toThrow(/fully close.*reopen/i);
+    expect(minted).not.toHaveBeenCalled();
+    expect(first.signal.aborted).toBe(false);
+  });
+
+  it("registers independent token disposal for each launch", async () => {
+    const fake = start();
+    const cwd = tempDir("plugin-plain-");
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const first = await fake.open({ provider: "claude", cwd });
+    const second = await fake.open({ provider: "claude", cwd }, {}, { launchId: "second" });
+    const tokens = new TokenAuthority(await loadTokenSecret(root));
+    const legacy = tokens.mint({ repoKey: null, cwd, provider: "claude" });
+    expect(first.config.mcpServers["paseo-memorise"].headers.Authorization).not.toBe(second.config.mcpServers["paseo-memorise"].headers.Authorization);
+    expect(first.config.mcpServers["paseo-memorise"].headers.Authorization).toMatch(/^Bearer launch\./);
+    expect(second.config.mcpServers["paseo-memorise"].headers.Authorization).toMatch(/^Bearer launch\./);
+    await first.dispose();
+    const authority = minted.mock.contexts[0] as TokenAuthority;
+    expect(authority.verify(first.config.mcpServers["paseo-memorise"].headers.Authorization)).toBeNull();
+    expect(authority.verify(second.config.mcpServers["paseo-memorise"].headers.Authorization)?.agentId).toBe("agent-1");
+    expect(tokens.verify(`Bearer ${legacy}`)?.provider).toBe("claude");
+  });
+
+  it("does not let a limited agent in the same folder borrow another agent's receipt", async () => {
+    const fake = start({ ...defaults, showInAgentChats: true });
+    const cwd = tempDir("plugin-plain-");
+    await fake.call("memory.save", { where: { directory: cwd }, scope: "repo", type: "howto", subject: "build", body: "Run make." });
+    await fake.open({ provider: "claude", cwd }, {}, { agentId: "owner", launchId: "owner-launch" });
+    await fake.open({ provider: "claude", cwd }, {}, { agentId: "limited", launchId: "limited-launch", openSupport: { ...fullSupport, instructions: "unsupported", mcpHttp: "unsupported" } });
+    await fake.agentCreated("limited", cwd);
+    await fake.agentCreated("owner", cwd);
+    expect(fake.appended).toEqual([{ agentId: "owner", row: expect.objectContaining({ data: expect.objectContaining({ listed: 1 }) }) }]);
+  });
 
   it("acts on the key a folder now goes by when the panel names one of its alias keys", async () => {
     const notes = await realpath(tempDir("plugin-alias-"));
@@ -113,40 +589,48 @@ describe("memorise server entry", () => {
     const fake = start();
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
     await fake.call("memory.save", { where: { directory: cwd }, scope: "global", type: "preference", subject: "commits", body: "Ask before running git commit." });
-    const { config } = await fake.create({ provider: "claude", cwd, systemPrompt: "Be brief.", mcpServers: other });
+    const { config } = await fake.open({ provider: "claude", cwd, systemPrompt: "Be brief.", mcpServers: other });
     expect(config.systemPrompt).toMatch(/^Be brief\.\n\n<memorise>/);
     expect(config.systemPrompt).toContain("preference (global): commits: Ask before running git commit.");
     expect(Object.keys(config.mcpServers).sort()).toEqual(["excalidraw", "paseo-memorise", "paseo-memorise-write"]);
     expect(config.mcpServers["paseo-memorise"].headers.Authorization).toMatch(/^Bearer /);
   });
 
-  it("re-scopes a child agent instead of keeping its parent's section and token", async () => {
+  it("scopes independent opens to their actual provider and project without saving contributions", async () => {
     const fake = start();
     const parentCwd = await repoWithOrigin("git@github.com:acme/api.git");
     const childCwd = await repoWithOrigin("git@github.com:acme/web.git");
-    const parent = (await fake.create({ provider: "codex", cwd: parentCwd, mcpServers: other })).config;
-    const child = (await fake.create({ ...parent, provider: "opencode", cwd: childCwd })).config;
+    const minted = vi.spyOn(TokenAuthority.prototype, "mintLaunch");
+    const base = { provider: "my-codex", cwd: parentCwd, mcpServers: other };
+    const parent = (await fake.open(base)).config;
+    const child = (await fake.open({ provider: "my-opencode", cwd: childCwd }, {}, { agentId: "child-1", launchId: "child-launch" })).config;
     expect(child.systemPrompt.match(/<memorise>/g)).toHaveLength(1);
     expect(child.systemPrompt).toContain("github.com/acme/web");
     expect(child.mcpServers["paseo-memorise"].headers.Authorization).not.toBe(parent.mcpServers["paseo-memorise"].headers.Authorization);
+    expect(base).toEqual({ provider: "my-codex", cwd: parentCwd, mcpServers: other });
+    const tokens = minted.mock.contexts[0] as TokenAuthority;
+    expect(tokens.verify(parent.mcpServers["paseo-memorise"].headers.Authorization)?.provider).toBe("my-codex");
+    expect(tokens.verify(child.mcpServers["paseo-memorise"].headers.Authorization)?.provider).toBe("my-opencode");
   });
 
-  it("adds nothing and strips inherited memory when turned off or for other providers", async () => {
+  it("adds nothing while Off and preserves saved caller endpoints, prompt and policy", async () => {
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
-    const on = start();
-    const inherited = (await on.create({ provider: "claude", cwd, systemPrompt: "Own.", mcpServers: other })).config;
-    await cleanup();
-    for (const [values, provider] of [[{ ...defaults, enabled: false }, "claude"], [defaults, "deepseek-harness"]] as const) {
-      const fake = start(values);
-      const { config } = await fake.create({ ...inherited, provider });
-      expect(config.systemPrompt).toBe("Own.");
-      expect(Object.keys(config.mcpServers)).toEqual(["excalidraw"]);
-      await cleanup();
-    }
-    cleanup = () => undefined;
+    const fake = start({ ...defaults, enabled: false });
+    const saved = { provider: "claude", cwd, systemPrompt: "Own.\n\n<memorise>saved</memorise>", mcpServers: { "paseo-memorise": { type: "http", url: "http://caller.invalid/mcp" } }, toolPolicy: { preapproved: [{ kind: "mcp", server: "paseo-memorise", tool: "caller_tool" }] } };
+    const opened = await fake.open(saved);
+    expect(opened.config).toEqual(saved);
+    expect(opened.request.toolPolicy).toBeUndefined();
   });
 
-  it("approves reads for Claude and Codex but never writes", async () => {
+  it("adds no notes, endpoints or grants for a fresh opening with memory Off", async () => {
+    const fake = start({ ...defaults, enabled: false });
+    const opened = await fake.open({ provider: "claude", cwd: tempDir("plugin-plain-"), systemPrompt: "Own.", mcpServers: other });
+    expect(opened.config.systemPrompt).toBe("Own.");
+    expect(opened.request.mcpServers).toEqual({});
+    expect(opened.request.toolPolicy).toBeUndefined();
+  });
+
+  it("leaves ordinary permission requests unanswered, including named reads and writes", async () => {
     const fake = start();
     await fake.permission({ id: "r1", name: "mcp__paseo-memorise__memory_search" });
     await fake.permission({ id: "r2", name: "CodexMcpElicitation", metadata: { serverName: "paseo-memorise" } });
@@ -155,11 +639,11 @@ describe("memorise server entry", () => {
     // A user's own server that happens to use the old, generic name is never approved.
     await fake.permission({ id: "u1", name: "mcp__memorise__delete_everything" });
     await fake.permission({ id: "u2", name: "CodexMcpElicitation", metadata: { serverName: "memorise" } });
-    // Only the two read tools are approved: another tool under the read server's name is not Memorise's.
+    // Exact read grants never authorize another tool under the read server's name.
     await fake.permission({ id: "r3", name: "mcp__paseo-memorise__memory_read" });
     await fake.permission({ id: "f1", name: "mcp__paseo-memorise__delete_everything" });
     await fake.permission({ id: "f2", name: "mcp__paseo-memorise__memory_read_all" });
-    expect(fake.respondToPermission.mock.calls.map(([call]) => call.requestId)).toEqual(["r1", "r2", "r3"]);
+    expect(fake.respondToPermission).not.toHaveBeenCalled();
   });
 
   it("approves no read where Memorise gives agents no tools: memory off, the project off, or another provider", async () => {
@@ -176,7 +660,7 @@ describe("memorise server entry", () => {
     expect(fake.respondToPermission).not.toHaveBeenCalled();
     await fake.call("memory.repo-prefs.set", { repoKey: "github.com/acme/api", prefs: { enabled: true, includeGlobal: true, capture: "default", autoApprove: false } });
     await fake.permission(read, cwd);
-    expect(fake.respondToPermission.mock.calls.map(([call]) => call.requestId)).toEqual(["r1"]);
+    expect(fake.respondToPermission).not.toHaveBeenCalled();
   });
 
   it("asks for every read when automatic read approval is off", async () => {
@@ -191,7 +675,7 @@ describe("memorise server entry", () => {
     const { fact } = await fake.call("memory.save", { where: { directory: plain }, scope: "repo", type: "howto", subject: "notes", body: "Drafts live in drafts/." });
     expect(fact.repoKey).toMatch(/^folder\/plain-/);
     const errors = vi.spyOn(console, "error");
-    const { config } = await fake.create({ provider: "claude", cwd: plain });
+    const { config } = await fake.open({ provider: "claude", cwd: plain });
     // No git history to diff, so changed files are not asked for (and no error is logged).
     expect(errors.mock.calls.flat().join("\n")).not.toMatch(/changed files/);
     errors.mockRestore();
@@ -203,18 +687,17 @@ describe("memorise server entry", () => {
     await fake.workspaceCreated(plain);
     const sub = join(plain, "drafts");
     await mkdir(sub);
-    await vi.waitFor(async () => expect((await fake.create({ provider: "claude", cwd: sub })).config.systemPrompt).toContain("notes: Drafts live in drafts/."));
+    await vi.waitFor(async () => expect((await fake.open({ provider: "claude", cwd: sub })).config.systemPrompt).toContain("notes: Drafts live in drafts/."));
     await expect(fake.call("memory.save", { where: { directory: plain }, scope: "global", type: "howto", subject: "x", body: "token: ghp_abcdefghijklmnopqrstuvwxyz0123456789" })).rejects.toThrow(/GitHub token/);
   });
 
-  it("still creates the agent, with the problem named, when settings cannot be read", async () => {
+  it("still opens the agent, with the problem named, when settings cannot be read", async () => {
     const fake = fakeServer(defaults, async () => {
       throw new Error("settings store offline");
     });
-    cleanup = () => undefined;
-    contributeMemory(fake.server, async () => root);
+    cleanup = contributeMemory(fake.server, async () => root) as () => unknown;
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
-    const { config } = await fake.create({ provider: "codex", cwd, systemPrompt: "Own.", mcpServers: other });
+    const { config } = await fake.open({ provider: "codex", cwd, systemPrompt: "Own.", mcpServers: other });
     expect(config.systemPrompt).toMatch(/Memory problem: memory could not be loaded \(Error: settings store offline\)/);
     expect(Object.keys(config.mcpServers)).toEqual(["excalidraw"]);
   });
@@ -231,10 +714,10 @@ describe("memorise server entry", () => {
     const fake = start();
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
     await fake.call("memory.save", { where: { directory: cwd }, scope: "global", type: "preference", subject: "commits", body: "Ask before committing." });
-    const byMarker = (await fake.create({ provider: "codex", cwd, systemPrompt: "Extract facts.", mcpServers: other }, { MEMORISE_ROLE: "worker" })).config;
+    const byMarker = (await fake.open({ provider: "codex", cwd, systemPrompt: "Extract facts.", mcpServers: other }, { MEMORISE_ROLE: "worker" })).config;
     expect(byMarker.systemPrompt).toBe("Extract facts.");
     expect(Object.keys(byMarker.mcpServers)).toEqual(["excalidraw"]);
-    const byFolder = (await fake.create({ provider: "claude", cwd: join(root, "workers", "run-1"), systemPrompt: "Tidy." })).config;
+    const byFolder = (await fake.open({ provider: "claude", cwd: join(root, "workers", "run-1"), systemPrompt: "Tidy." })).config;
     expect(byFolder.systemPrompt).toBe("Tidy.");
     await fake.permission({ id: "p1", name: "Bash" }, join(root, "workers", "run-1"));
     expect(fake.respondToPermission).toHaveBeenCalledWith({ requestId: "p1", response: { behavior: "deny", message: "Memory workers may not use tools." } });
@@ -246,7 +729,7 @@ describe("memorise server entry", () => {
     const { fact: first } = await fake.call("memory.save", { where: { directory: cwd }, scope: "repo", type: "howto", subject: "first", body: "Older fact." });
     await fake.call("memory.save", { where: { directory: cwd }, scope: "repo", type: "howto", subject: "second", body: "Newer fact." });
     await fake.call("memory.pin", { where: { directory: cwd }, id: first.id, pinned: true });
-    const { config } = await fake.create({ provider: "claude", cwd });
+    const { config } = await fake.open({ provider: "claude", cwd });
     const lines = config.systemPrompt.split("\n").filter((line: string) => line.startsWith("- ["));
     expect(lines[0]).toContain("(pinned): first");
     const listed = await fake.call("memory.list", { where: { directory: cwd } });
@@ -332,7 +815,7 @@ describe("memorise server entry", () => {
     await fake.call("memory.save", { where, scope: "repo", type: "howto", subject: "listed one", body: "Shown." });
     const { fact: off } = await fake.call("memory.save", { where, scope: "repo", type: "howto", subject: "disabled one", body: "Hidden.", enabled: false });
     const { fact: manual } = await fake.call("memory.save", { where, scope: "repo", type: "howto", subject: "manual one", body: "Search only.", activation: "manual" });
-    const listedSubjects = async () => (await fake.create({ provider: "claude", cwd })).config.systemPrompt.split("\n").filter((line: string) => line.startsWith("- ["));
+    const listedSubjects = async () => (await fake.open({ provider: "claude", cwd })).config.systemPrompt.split("\n").filter((line: string) => line.startsWith("- ["));
     const before = (await listedSubjects()).join("\n");
     expect(before).toContain("listed one");
     expect(before).not.toContain("disabled one");
@@ -357,7 +840,7 @@ describe("memorise server entry", () => {
       { id: global.id, subject: "commits", reason: "global", titleOnly: false },
       { id: title.id, subject: "deploy", reason: "repo", titleOnly: true },
     ]);
-    const { config } = await fake.create({ provider: "claude", cwd });
+    const { config } = await fake.open({ provider: "claude", cwd });
     expect(config.systemPrompt).toContain(preview.text);
     expect(preview.bytes).toBe(Buffer.byteLength(preview.text));
   });
@@ -370,12 +853,12 @@ describe("memorise server entry", () => {
     await fake.call("memory.save", { where: { directory: cwd }, scope: "global", type: "preference", subject: "global fact", body: "Everywhere." });
     expect((await fake.call("memory.repo-prefs.get", { repoKey })).prefs).toEqual({ enabled: true, includeGlobal: true, capture: "default", autoApprove: false });
     await fake.call("memory.repo-prefs.set", { repoKey, prefs: { enabled: false, includeGlobal: true, capture: "default" } });
-    const off = (await fake.create({ provider: "claude", cwd, systemPrompt: "Own.", mcpServers: other })).config;
+    const off = (await fake.open({ provider: "claude", cwd, systemPrompt: "Own.", mcpServers: other })).config;
     expect(off.systemPrompt).toBe("Own.");
     expect(Object.keys(off.mcpServers)).toEqual(["excalidraw"]);
     expect((await fake.call("memory.preview", { directory: cwd })).off).toBe(true);
     await fake.call("memory.repo-prefs.set", { repoKey, prefs: { enabled: true, includeGlobal: false, capture: "default" } });
-    const apart = (await fake.create({ provider: "claude", cwd })).config.systemPrompt;
+    const apart = (await fake.open({ provider: "claude", cwd })).config.systemPrompt;
     expect(apart).toContain("repo fact");
     expect(apart).not.toContain("global fact");
   });
@@ -506,7 +989,7 @@ describe("memorise server entry", () => {
     await fake.call("memory.save", { where: { directory: site }, scope: "repo", type: "howto", subject: "deploy", body: "Upload with rsync." });
     const blog = join(site, "blog");
     await mkdir(blog);
-    expect((await fake.create({ provider: "claude", cwd: blog })).config.systemPrompt).toContain("deploy: Upload with rsync.");
+    expect((await fake.open({ provider: "claude", cwd: blog })).config.systemPrompt).toContain("deploy: Upload with rsync.");
   });
 
   it("shows each agent a receipt of the memories it was given, updated as it uses them", async () => {
@@ -514,7 +997,7 @@ describe("memorise server entry", () => {
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
     const where = { repoKey: "github.com/acme/api" };
     for (const subject of ["one", "two"]) await fake.call("memory.save", { where, scope: "repo", type: "howto", subject, body: `${subject} body.` });
-    await fake.create({ provider: "claude", cwd });
+    await fake.open({ provider: "claude", cwd }, {}, { agentId: "agent-9" });
     // An agent Memorise did not prepare (another folder) gets no receipt.
     await fake.agentCreated("agent-8", tempDir("plugin-plain-"));
     const read = { type: "tool_call", callId: "c1", name: "mcp__paseo-memorise__memory_read", detail: { type: "unknown" }, status: "completed", error: null };
@@ -535,7 +1018,7 @@ describe("memorise server entry", () => {
   it("adds no receipt with the default settings", async () => {
     const fake = start();
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
-    await fake.create({ provider: "claude", cwd });
+    await fake.open({ provider: "claude", cwd });
     await fake.agentCreated("agent-1", cwd);
     await fake.turnEnded("agent-1", cwd, [{ type: "tool_call", callId: "c1", name: "memory_read", detail: {}, status: "completed", error: null }]);
     expect(fake.appended).toEqual([]);
@@ -546,7 +1029,7 @@ describe("memorise server entry", () => {
     const fake = fakeServer(defaults, async () => ({ status: "ready", revision: "1", values }));
     cleanup = contributeMemory(fake.server, async () => root) as () => unknown;
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
-    await fake.create({ provider: "claude", cwd });
+    await fake.open({ provider: "claude", cwd });
     await fake.agentCreated("agent-1", cwd);
     expect(fake.appended).toHaveLength(1);
     values = { ...values, showInAgentChats: false };
@@ -559,7 +1042,7 @@ describe("memorise server entry", () => {
     const plain = tempDir("plugin-plain-");
     const where = { directory: plain };
     await fake.call("memory.save", { where, scope: "repo", type: "howto", subject: "drafts", body: "Drafts use the template.", paths: ["drafts/**"], activation: "files" });
-    const listed = async () => (await fake.create({ provider: "claude", cwd: plain })).config.systemPrompt as string;
+    const listed = async () => (await fake.open({ provider: "claude", cwd: plain })).config.systemPrompt as string;
     expect(await listed()).not.toContain("Drafts use the template.");
     await mkdir(join(plain, "drafts"));
     await writeFile(join(plain, "drafts", "trip.md"), "Day one.\n");

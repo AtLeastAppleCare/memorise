@@ -89,6 +89,25 @@ describe("memory MCP servers", () => {
     expect(writeTools.sort()).toEqual(["memory_retire", "memory_update", "memory_write"]);
   });
 
+  it("revokes only a disposed launch credential and leaves other launches and legacy credentials usable", async () => {
+    const first = tokens.mintLaunch({ repoKey: REPO, cwd: "/tmp", provider: "work-alias", agentId: "owner" });
+    const other = tokens.mintLaunch({ repoKey: "github.com/acme/web", cwd: "/tmp", provider: "other-alias", agentId: "outsider" });
+    const legacy = bearer({ repoKey: REPO, cwd: "/tmp", provider: "claude" });
+    const ownerFact = await store.create({ scope: "repo", repoKey: REPO, type: "howto", subject: "owner only", body: "Owner private note.", supersedes: null, source: { by: "user", provider: null, branch: null, commit: null }, citations: [] });
+    const owner = await connect("read", `Bearer ${first.token}`);
+    const outsider = await connect("read", `Bearer ${other.token}`);
+    expect((await call(owner, "memory_read", { id: ownerFact.id })).text).toContain("Owner private note.");
+    const refused = await call(outsider, "memory_read", { id: ownerFact.id });
+    expect(refused.isError).toBe(true);
+    expect(refused.text).not.toContain("Owner private note.");
+    first.dispose();
+    first.dispose();
+    await expect(owner.listTools()).rejects.toThrow(/401|not valid/);
+    expect((await outsider.listTools()).tools.map((tool) => tool.name)).toEqual(["memory_search", "memory_read"]);
+    expect((await (await connect("read", legacy)).listTools()).tools).toHaveLength(2);
+    expect(tokens.verify(`Bearer ${other.token}`)).toEqual({ repoKey: "github.com/acme/web", cwd: "/tmp", provider: "other-alias", agentId: "outsider" });
+  });
+
   it("tells agents the argument names and the types they may choose, custom ones included", async () => {
     const auth = bearer({ repoKey: REPO, cwd: "/tmp", provider: "claude" });
     const listed = async () => (await (await connect("write", auth)).listTools()).tools.find((tool) => tool.name === "memory_write");
@@ -331,6 +350,14 @@ describe("shutdown", () => {
 });
 
 describe("token secret", () => {
+  it("does not revive disposed in-memory credentials after an authority restart", () => {
+    const secret = randomBytes(32);
+    const tokens = new TokenAuthority(secret);
+    const launch = tokens.mintLaunch({ repoKey: REPO, cwd: "/tmp", provider: "work-alias", agentId: "owner" });
+    expect(tokens.verify(`Bearer ${launch.token}`)?.agentId).toBe("owner");
+    expect(new TokenAuthority(secret).verify(`Bearer ${launch.token}`)).toBeNull();
+  });
+
   it("is created once with owner-only permissions and survives a restart", async () => {
     const root = tempDir("memorise-");
     const first = await loadTokenSecret(root);

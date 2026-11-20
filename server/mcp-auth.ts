@@ -10,13 +10,15 @@ export const agentScopeSchema = z.object({
   repoKey: repoKeySchema.nullable(),
   cwd: z.string().min(1),
   provider: z.string().min(1),
+  agentId: z.string().min(1).optional(),
 });
 export type AgentScope = z.infer<typeof agentScopeSchema>;
 
-// Paseo stores injected MCP entries with the agent and reuses them on resume, so a token must stay
-// valid across plugin reloads and daemon restarts. It is stateless: the scope travels inside the
-// token, and an HMAC with a secret kept on disk proves the plugin issued it.
+// Legacy saved endpoints use stateless signed tokens that survive restarts. New endpoints use
+// random in-memory credentials, revoked only when their host-owned launch lifetime is disposed.
 export class TokenAuthority {
+  private readonly launches = new Map<string, AgentScope>();
+
   constructor(private readonly secret: Buffer) {
     if (secret.length !== SECRET_BYTES) throw new Error(`Expected a ${SECRET_BYTES}-byte token secret, got ${secret.length} bytes`);
   }
@@ -30,7 +32,14 @@ export class TokenAuthority {
     return `${payload}.${this.sign(payload).toString("base64url")}`;
   }
 
+  mintLaunch(scope: AgentScope): { token: string; dispose: () => void } {
+    const token = `launch.${randomBytes(32).toString("base64url")}`;
+    this.launches.set(token, agentScopeSchema.parse(scope));
+    return { token, dispose: () => { this.launches.delete(token); } };
+  }
+
   verify(authorization: string | undefined): AgentScope | null {
+    if (authorization?.startsWith("Bearer launch.")) return this.launches.get(authorization.slice(7)) ?? null;
     const match = /^Bearer ([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$/.exec(authorization ?? "");
     if (!match) return null;
     const expected = this.sign(match[1]);

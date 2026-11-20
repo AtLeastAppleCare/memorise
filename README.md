@@ -20,7 +20,7 @@ The plugin's id in Paseo is `memorise`.
 
 ## Requirements
 
-- Paseo 0.12.0 or later (tested with 0.12.0 and 0.14.0 on macOS).
+- This source branch requires a Paseo host advertising `adaptiveAgentFeatures`. Memorise stops at setup with update guidance on older hosts; it does not fall back to saved create-time injection. A released host/SDK version has not yet been assigned for this change.
 - git and npm on the daemon host.
 - At least one of the Claude, Codex, or OpenCode providers set up in Paseo.
 
@@ -59,7 +59,7 @@ paseo plugin ls
 
 The `memorise` row should say `running`. Logs are in `paseo plugin logs memorise`, or Settings > Plugins > Logs.
 
-Only agents created after the install get memory. Agents already running keep the prompt and tools they started with.
+Memory is derived at each interactive session opening (create, resume, import, or refresh). Running turns keep the prompt and tools they started with; history-only opens add nothing. See [Adaptive session features](#adaptive-session-features) for limitations and saved configurations.
 
 ## Using it
 
@@ -126,7 +126,7 @@ Settings > Plugins > Memorise, or **Settings** in Memorise. The main level holds
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Give agents memory | on | Off keeps saved memories |
-| Read memories without asking | on | Covers only Memorise's two read tools (`memory_search`, `memory_read`), and only where Memorise gives agents its tools: not with memory off, in a project with memory off, or for other providers. Saving or changing a memory still asks, unless the agent runs in a mode that skips approvals |
+| Read memories without asking | on | Adds optional exact grants for `memory_search` and `memory_read` only when the host establishes exact approval support and Memorise contributes those endpoints for this opening. Otherwise ordinary provider prompts remain unanswered. Saving or changing a memory still asks, unless the agent runs in a mode that skips approvals |
 | Show Memorise in agent chats | off | A line when an agent starts (memories in its prompt), one after each turn that used them, with the totals so far, and a card when a session's suggestions are ready. Off: review suggestions in the Suggestions tab |
 | Open suggestion cards in chats | off | A suggestions card starts open, with its suggestions showing. Off: it starts as one line with its count, and opens when you press that line. Applies to cards made from now on |
 | Notify when a background run finishes | off | Paseo's notifications when a session suggestion, clean-up, or project scan finishes or fails. Off: their worker agents are Paseo background agents and end quietly; a failed run shows on its status in Memorise |
@@ -151,7 +151,7 @@ With no model set, a provider's default model is used, which for Claude is its l
 ## How it works
 
 ```
-agent created in a workspace
+interactive session opens in a workspace
         |
         v
 plugin finds the repo key from the origin remote   e.g. github.com/acme/api
@@ -161,7 +161,7 @@ plugin finds the repo key from the origin remote   e.g. github.com/acme/api
 reads memories: repo + global  -->  ranks them  -->  adds the list to the system prompt
         |
         v
-adds two MCP servers with a token for this agent's repo
+adds eligible MCP servers with an in-memory token for this agent and opening
   paseo-memorise        memory_search, memory_read
   paseo-memorise-write  memory_write, memory_update, memory_retire
 ```
@@ -177,9 +177,27 @@ Everything is stored as files on the daemon host, under `plugin-data/memorise/` 
 | `audit.jsonl` | Every tool call: time, repository, provider, tool, memory id (never the text) |
 | `usage.jsonl` | How often each memory was shown, read, and found (ids only) |
 | `index.sqlite` | Full-text search index; a cache rebuilt from the Markdown files |
-| `secret` | Key that signs the per-agent tool tokens |
+| `secret` | Key that verifies legacy saved signed tool tokens; new launch tokens live only in memory |
 
 The Markdown files are the source of truth. Updating a memory writes a new file that names the old one, so the history is kept and a crash cannot leave two current versions.
+
+### Adaptive session features
+
+The host reports instruction delivery, HTTP MCP transport, and exact MCP approval support separately. Unknown support omits only that optional feature. Supported instructions without tools contain bounded read-only notes, with no tool-use guidance in title-only or overflow lines. Tools can be delivered without instructions or automatic approval. Global/project Off and global-memory selection still apply; no provider limitation changes those preferences or saved memories.
+
+New endpoint credentials are random, held in memory, and scoped to the actual selected provider, agent, folder, and project. The host's launch disposal revokes only that opening's credential, including failed attempts. They do not add credential rows on refresh. Existing signed tokens remain valid for unadopted saved endpoints.
+
+A saved endpoint named `paseo-memorise` or `paseo-memorise-write` suppresses the entire new memory group before credential allocation. Memorise leaves the original endpoint, policy, and prompt untouched, even with memory Off; the name is not ownership or permission to autoapprove it. A recognized or ambiguous saved `<memorise>` prompt section suppresses fresh notes but can coexist with a newly derived endpoint when its names are free. The plugin log explains saved configuration and limitations.
+
+The plugin registers literal legacy selectors for host-owned preview/adopt/reset. Adoption is explicit: Memorise does not migrate or delete saved chat configuration. Partial adoption can leave saved text non-adaptive. Before downgrading to a host without adoption support, reset or review receipts: the older host may reactivate the original saved additions.
+
+Fixed MCP configurations with a prior owned binding reuse only the same live plugin instance's installed prior contribution, supplied and retained by the host. Memorise compares launch-local fingerprints of settings, project preferences and scope, global-memory selection, and instruction/tool/approval eligibility. Compatible reuse appends the retained own instructions after the current incoming instructions and returns the exact prior own endpoints, grants, environment and options while keeping current caller environment values. It allocates no credential; the host holds the prior lifetime until all dependent launches release it.
+
+For an owned binding, changed settings (including Off), changed project or prompt eligibility, missing/disposed/provisional prior launches, and plugin restarts refuse fixed reuse with full-close/reopen guidance before allocation. Fully close the session and retained children, then reopen it. Without a prior owned binding, fixed openings remain credential-free: Off and saved caller bindings stay unchanged, while eligible read-only notes can still be derived. Compatibility fingerprints contain no bindings or credentials and are removed with their launch lifetime; they cannot restore authority after a restart.
+
+Session-capture helpers retain the selected actual provider alias for execution and model lookup. Only the resolved Claude, Codex, or OpenCode adapter selects its existing worker lockdown. Unsupported capture sources remain excluded, including when a fixed capture provider is selected. This does not promise that every alias can run a helper; the helper's own opening still validates its configuration.
+
+### Project identity
 
 A repository without an origin is grouped by its git folder, which its worktrees share. A clone whose origin uses an SSH host alias (such as `work-github:owner/repo`) is grouped under that alias.
 
@@ -237,6 +255,8 @@ npm run typecheck
 ```
 
 `npm test` runs the Vitest suite; the tests create their temporary folders through `server/test-temp-dir.ts`, which removes them after each test. `npm run typecheck` checks the app side and the daemon side separately.
+
+For this unreleased adaptive source, stage locally built protocol/client/plugin SDK artifacts in an isolated dependency directory before verification. Keep the committed manifest and lockfile unchanged until a real host/SDK release is assigned. Do not commit absolute local `file:` dependencies. Existing 0.12.0 development metadata does not make this branch install-ready on that host.
 
 After changing the code, reload the plugin so the daemon picks it up:
 
