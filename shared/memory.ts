@@ -420,7 +420,11 @@ export const PROPOSALS_CARD_KIND = "memorise-proposals";
 // proposals this pass left waiting; open: whether the card starts open (the openSuggestionCards
 // setting when it was made). Cards from before 0.10.4 have no ids and list every waiting proposal
 // from the agent; cards from before 0.14.2 have no open and start folded.
-export const proposalsCardSchema = z.object({ count: z.number().int().min(0), autoSaved: z.number().int().min(0).default(0), ids: z.array(z.string()).optional(), open: z.boolean().default(false) });
+// saved: historical wording of completed automatic approvals, not live memory records. Its IDs
+// identify the original suggestions. Older cards have no snapshots and cannot reconstruct them.
+export const savedSuggestionSchema = proposalSchema.pick({ id: true, type: true, subject: true, body: true, paths: true });
+export type SavedSuggestion = z.infer<typeof savedSuggestionSchema>;
+export const proposalsCardSchema = z.object({ count: z.number().int().min(0), autoSaved: z.number().int().min(0).default(0), ids: z.array(z.string()).optional(), open: z.boolean().default(false), saved: z.array(savedSuggestionSchema).optional() });
 
 // A row in an agent's chat: how many memories its prompt listed, and how it used the memory tools
 // so far. Each update is a new row (see appendReceipt in server/plugin.ts).

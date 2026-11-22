@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promise
 import { join } from "node:path";
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { z } from "zod";
-import { allowedTypes, type FactListItem, type MemorySettings, PROPOSALS_CARD_KIND, type RunStatus } from "../shared/memory";
+import { allowedTypes, type FactListItem, type MemorySettings, PROPOSALS_CARD_KIND, type RunStatus, savedSuggestionSchema, type SavedSuggestion } from "../shared/memory";
 import { checkCitations } from "./citations";
 import { buildCapturePrompt, buildProjectPrompt, buildTidyPrompt, captureOutputSchema, parseCandidates, parseProjectReply, parseTidyActions, projectOutputSchema, type ScanMode, TIDY_OUTPUT_SCHEMA } from "./extractor";
 import type { PaseoApi } from "./paseo-types";
@@ -195,10 +195,11 @@ export class Capture {
 
   // Adds proposals, then, when the repo has auto-approve on, approves the new memories among them at
   // once. Changes to saved memories (tidy, replace, retire) always wait for the user.
-  private async addProposals(repoKey: string, candidates: readonly NewProposal[], facts: readonly FactListItem[]): Promise<{ pending: number; autoSaved: number; pendingIds: string[] }> {
+  private async addProposals(repoKey: string, candidates: readonly NewProposal[], facts: readonly FactListItem[]): Promise<{ pending: number; autoSaved: number; pendingIds: string[]; saved: SavedSuggestion[] }> {
     const added = await this.deps.proposals.add(candidates, facts);
-    if (!(await this.deps.repoPrefs.get(repoKey)).autoApprove) return { pending: added.length, autoSaved: 0, pendingIds: added.map((proposal) => proposal.id) };
+    if (!(await this.deps.repoPrefs.get(repoKey)).autoApprove) return { pending: added.length, autoSaved: 0, pendingIds: added.map((proposal) => proposal.id), saved: [] };
     const pendingIds: string[] = [];
+    const saved: SavedSuggestion[] = [];
     for (const proposal of added) {
       if (proposal.kind !== "new" || proposal.source.from === "tidy") {
         pendingIds.push(proposal.id);
@@ -206,12 +207,13 @@ export class Capture {
       }
       try {
         await this.deps.proposals.approve(proposal.id, repoKey, this.deps.store, {}, "auto");
+        saved.push(savedSuggestionSchema.parse(proposal));
       } catch (error) {
         pendingIds.push(proposal.id);
         console.error(`[memorise] could not auto-approve "${proposal.subject}": ${error instanceof Error ? error.message : String(error)}; it waits for review`);
       }
     }
-    return { pending: pendingIds.length, autoSaved: added.length - pendingIds.length, pendingIds };
+    return { pending: pendingIds.length, autoSaved: saved.length, pendingIds, saved };
   }
 
   isScanning(repoKey: string): boolean {
@@ -407,7 +409,7 @@ export class Capture {
         // card: Paseo refuses to fork from replies under a row that was replaced after them.
         await paseo.agents
           .ref(agent.id)
-          .timeline.append({ type: "plugin", id: `${PROPOSALS_CARD_KIND}:${randomUUID()}`, kind: PROPOSALS_CARD_KIND, version: 1, data: { count: added.pending, autoSaved: added.autoSaved, ids: added.pendingIds, open: settings.openSuggestionCards } })
+          .timeline.append({ type: "plugin", id: `${PROPOSALS_CARD_KIND}:${randomUUID()}`, kind: PROPOSALS_CARD_KIND, version: 1, data: { count: added.pending, autoSaved: added.autoSaved, ids: added.pendingIds, open: settings.openSuggestionCards, saved: added.saved } })
           .catch((error: unknown) => console.error(`[memorise] could not add the proposals card: ${String(error)}`));
       }
       return added.pending;
