@@ -3,7 +3,7 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PluginHookAgent } from "@getpaseo/plugin/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { BUILTIN_TYPES, memorySettings, type MemorySettings } from "../shared/memory";
+import { BUILTIN_TYPES, memorySettings, type MemorySettings, proposalsCardSchema } from "../shared/memory";
 import { Capture } from "./capture";
 import { buildCapturePrompt, parseCandidates, parseTidyActions } from "./extractor";
 import type { AgentTimelineItem, PaseoApi } from "./paseo-types";
@@ -15,6 +15,15 @@ import { tempDir } from "./test-temp-dir";
 import { sliceTranscript } from "./transcript";
 import { UsageLog } from "./usage";
 import { extractJson, isWorkerRequest, runWorker, WORKER_ENV, WORKER_ROLE, WORKER_WORKSPACE_TITLE, workersDir } from "./workers";
+
+const cleanup = vi.hoisted(() => ({ failProposalRemoval: false }));
+vi.mock("node:fs/promises", async (original) => {
+  const fs = await original<typeof import("node:fs/promises")>();
+  return { ...fs, rm: async (...args: Parameters<typeof fs.rm>) => {
+    if (cleanup.failProposalRemoval && String(args[0]).includes("/proposals/") && String(args[0]).endsWith(".json")) throw new Error("proposal cleanup failed");
+    return fs.rm(...args);
+  } };
+});
 
 const REPO = "github.com/acme/api";
 
@@ -128,6 +137,7 @@ describe("capture", () => {
     agent = { id: "agent-1", workspaceId: "ws-a", parentAgentId: null, provider: "codex", cwd, title: null };
   });
   afterEach(() => {
+    cleanup.failProposalRemoval = false;
     capture.stop();
     vi.useRealTimers();
   });
@@ -384,6 +394,61 @@ describe("capture", () => {
     expect(await capture.captureNow(agent)).toBe(0);
     expect((await store.list(REPO)).map((fact) => fact.source.by)).toEqual(["auto"]);
     expect(fake.appended[0]).toMatchObject({ kind: "memorise-proposals", data: { count: 0, autoSaved: 1, ids: [] } });
+  });
+
+  it("preserves the saved wording and paths through the chat card schema", async () => {
+    await repoPrefs.set(REPO, { autoApprove: true });
+    const fake = fakePaseo(conversation(5), reply);
+    capture.remember(fake.paseo);
+    await capture.captureNow(agent);
+    const card = fake.appended[0] as { data: unknown };
+    expect(proposalsCardSchema.parse(card.data)).toMatchObject({
+      count: 0,
+      autoSaved: 1,
+      ids: [],
+      saved: [{ id: expect.any(String), type: "gotcha", subject: "integration tests", body: "Integration tests need DOCKER_HOST set.", paths: ["scripts/**"] }],
+    });
+  });
+
+  it("keeps a failed save pending while showing the successful memory from the same run", async () => {
+    await repoPrefs.set(REPO, { autoApprove: true });
+    const create = store.create.bind(store);
+    const failure = vi.spyOn(store, "create").mockRejectedValueOnce(new Error("disk full")).mockImplementation(create);
+    const fake = fakePaseo(conversation(5), JSON.stringify({ facts: [
+      { type: "gotcha", subject: "fails", body: "Could not save.", paths: [] },
+      { type: "howto", subject: "works", body: "Saved successfully.", paths: [] },
+    ] }));
+    capture.remember(fake.paseo);
+    expect(await capture.captureNow(agent)).toBe(1);
+    failure.mockRestore();
+    const [waiting] = await proposals.list(REPO);
+    expect(waiting.subject).toBe("fails");
+    expect(fake.appended[0]).toMatchObject({ data: { count: 1, autoSaved: 1, ids: [waiting.id], saved: [{ subject: "works", body: "Saved successfully." }] } });
+    expect(proposalsCardSchema.parse((fake.appended[0] as { data: unknown }).data).saved).toHaveLength(1);
+  });
+
+  it("does not report a completed approval when proposal cleanup fails after writing the memory", async () => {
+    await repoPrefs.set(REPO, { autoApprove: true });
+    cleanup.failProposalRemoval = true;
+    const fake = fakePaseo(conversation(5), reply);
+    capture.remember(fake.paseo);
+    expect(await capture.captureNow(agent)).toBe(1);
+    expect((await store.list(REPO)).map((fact) => fact.subject)).toEqual(["integration tests"]);
+    const [waiting] = await proposals.list(REPO);
+    expect(fake.appended[0]).toMatchObject({ data: { count: 1, autoSaved: 0, ids: [waiting.id], saved: [] } });
+  });
+
+  it("keeps each run's saved snapshots separate", async () => {
+    await repoPrefs.set(REPO, { autoApprove: true });
+    const first = fakePaseo(conversation(5), reply);
+    capture.remember(first.paseo);
+    await capture.captureNow(agent);
+    const second = fakePaseo(conversation(10), JSON.stringify({ facts: [{ type: "howto", subject: "lint", body: "Run make lint.", paths: [] }] }));
+    capture.remember(second.paseo);
+    await capture.captureNow(agent);
+    const data = proposalsCardSchema.parse((second.appended[0] as { data: unknown }).data);
+    expect(data.saved?.map((memory) => memory.subject)).toEqual(["lint"]);
+    expect(data.autoSaved).toBe(1);
   });
 
   it("with chat rows off, keeps the suggestions and moves on, but adds no chat card", async () => {

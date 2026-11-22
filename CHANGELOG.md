@@ -4,6 +4,12 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-11-22
+
+### Fixed
+
+- Expanding a chat card that says “saved without review” now shows the saved memories, rather than an empty area. Each has its title, kind, and text preview, and opens to show its full saved wording and file patterns, without Approve or Reject buttons. The card keeps a historical copy, so later edits or deletion in Memorise do not change it. Older cards did not record those details and now explain where to find the memories instead. Waiting suggestions keep their existing review controls.
+
 ## [0.14.2] - 2026-11-17
 
 ### Changed
@@ -328,7 +334,8 @@ First release.
 - Install straight from Git: `paseo plugin add git:monarchmaisuriya/memorise`.
 - The Memorise icon.
 
-[Unreleased]: https://github.com/monarchmaisuriya/memorise/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/monarchmaisuriya/memorise/compare/v0.14.3...HEAD
+[0.14.3]: https://github.com/monarchmaisuriya/memorise/releases/tag/v0.14.3
 [0.9.1]: https://github.com/monarchmaisuriya/memorise/releases/tag/v0.9.1
 [0.9.0]: https://github.com/monarchmaisuriya/memorise/releases/tag/v0.9.0
 [0.8.1]: https://github.com/monarchmaisuriya/memorise/releases/tag/v0.8.1

@@ -10,7 +10,7 @@ import { Badge, Button, type Styles, useStyles } from "./panel-ui";
 import { cardHeading, cardSuggestions, decideEach, oneLine, reviewedText, sameIds } from "./proposals-view";
 
 type CardData = z.infer<typeof proposalsCardSchema>;
-type Listed = z.infer<typeof listProposalsRpc.output>["proposals"][number];
+type Listed = NonNullable<CardData["saved"]>[number];
 type Decision = "approve" | "reject";
 
 // Spacing, in one place: the card's inner edge, the space above and below each line of the card,
@@ -49,7 +49,7 @@ function Frame({ waiting, autoSaved, startOpen, actions, styles, children }: { w
 
 // One suggestion: its title and kind, then its text (one line until opened), with Approve and
 // Reject beside it, or under it on a narrow screen. `running` is the decision in flight, if any.
-function Suggestion({ proposal, styles, compact, running, locked, onDecide }: { proposal: Listed; styles: Styles; compact: boolean; running: Decision | undefined; locked: boolean; onDecide(decision: Decision): void }) {
+function Suggestion({ proposal, styles, compact, running, locked = false, onDecide }: { proposal: Listed; styles: Styles; compact: boolean; running?: Decision; locked?: boolean; onDecide?(decision: Decision): void }) {
   const [open, setOpen] = useState(false);
   const { subject, body, paths } = proposal;
   return (
@@ -74,11 +74,23 @@ function Suggestion({ proposal, styles, compact, running, locked, onDecide }: { 
         </Text>
         {open && paths.length > 0 && <Text style={[styles.muted, { paddingLeft: MARK }]}>About files: {paths.join(", ")}</Text>}
       </Pressable>
-      <View style={{ flexDirection: "row", gap: LINE, paddingLeft: compact ? MARK : 0 }}>
+      {onDecide && <View style={{ flexDirection: "row", gap: LINE, paddingLeft: compact ? MARK : 0 }}>
         <Button label={running === "approve" ? "Approving" : "Approve"} accessibilityLabel={`Approve ${subject}`} tone="primary" disabled={locked} styles={styles} onPress={() => onDecide("approve")} />
         <Button label={running === "reject" ? "Rejecting" : "Reject"} accessibilityLabel={`Reject ${subject}`} disabled={locked} styles={styles} onPress={() => onDecide("reject")} />
-      </View>
+      </View>}
     </View>
+  );
+}
+
+function Saved({ data, styles, compact }: { data: CardData; styles: Styles; compact: boolean }) {
+  if (data.autoSaved === 0) return null;
+  return (
+    <>
+      <Text style={[styles.muted, { paddingLeft: MARK, paddingBottom: LINE }]}>
+        {data.saved === undefined ? "This older card did not record the saved details. Find the memories in Memorise." : "Wording saved by this run. Manage current memories in Memorise."}
+      </Text>
+      {data.saved?.map((proposal) => <Suggestion key={proposal.id} proposal={proposal} styles={styles} compact={compact} />)}
+    </>
   );
 }
 
@@ -146,6 +158,7 @@ function Review({ agentId, workspaceId, data, styles, compact, openPanel }: { ag
   const reviewed = mine ? reviewedText(data.ids, waitingIds) : null;
   return (
     <Frame waiting={mine ? mine.length : data.count} autoSaved={data.autoSaved} startOpen={data.open} actions={actions} styles={styles}>
+      <Saved data={data} styles={styles} compact={compact} />
       {query.isPending && <Text style={[styles.muted, { paddingLeft: MARK, paddingBottom: LINE }]}>Loading suggestions</Text>}
       {query.error && <Text style={[styles.danger, { paddingLeft: MARK, paddingBottom: LINE }]}>{errorText(query.error)}</Text>}
       {mine?.map((proposal) => (
@@ -160,7 +173,7 @@ function Review({ agentId, workspaceId, data, styles, compact, openPanel }: { ag
         ))}
       <View style={[styles.row, { borderTopWidth: 1, borderTopColor: styles.card.borderColor, paddingTop: LINE }]}>
         <Text style={[styles.muted, { flexGrow: 1, flexShrink: 1, paddingLeft: MARK }]}>{reviewed}</Text>
-        <Button label="Edit in Memorise" accessibilityLabel="Edit suggestions in the Memorise panel" styles={styles} onPress={() => openPanel(workspaceId)} />
+        <Button label="Edit in Memorise" accessibilityLabel="Edit memories and suggestions in the Memorise panel" styles={styles} onPress={() => openPanel(workspaceId)} />
       </View>
     </Frame>
   );
@@ -173,7 +186,8 @@ export function ProposalsCard({ agentId, item, theme, layout, openPanel }: Plugi
   if (workspaceId) return <Review agentId={agentId} workspaceId={workspaceId} data={item.data} styles={styles} compact={layout.compact} openPanel={openPanel} />;
   return (
     <Frame waiting={item.data.count} autoSaved={item.data.autoSaved} startOpen={item.data.open} styles={styles}>
-      <Text style={[styles.muted, { paddingLeft: MARK }]}>Review them in Memorise, under Suggestions.</Text>
+      <Saved data={item.data} styles={styles} compact={layout.compact} />
+      {item.data.count > 0 && <Text style={[styles.muted, { paddingLeft: MARK }]}>Review them in Memorise, under Suggestions.</Text>}
     </Frame>
   );
 }

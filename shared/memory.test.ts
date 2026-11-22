@@ -31,6 +31,13 @@ const savedByVersion1 = {
 };
 
 describe("memory settings", () => {
+  it("keeps old cards compatible and validates saved snapshots rather than stripping them", () => {
+    expect(proposalsCardSchema.parse({ count: 0, autoSaved: 5 }).saved).toBeUndefined();
+    expect(proposalsCardSchema.parse({ count: 0, saved: [] }).saved).toEqual([]);
+    expect(proposalsCardSchema.safeParse({ count: 0, saved: [{ id: "bad", type: "gotcha", subject: "Title", body: "Body", paths: [] }] }).success).toBe(false);
+    expect(proposalsCardSchema.safeParse({ count: 0, saved: null }).success).toBe(false);
+  });
+
   it("adds no rows to agent chats by default", () => {
     expect(memorySettings.schema.parse({}).showInAgentChats).toBe(false);
   });
