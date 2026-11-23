@@ -29,6 +29,9 @@ export const LOCKDOWN_OPTIONS: Record<Provider, Record<string, unknown>> = {
   codex: { sandbox_mode: "read-only", web_search: "disabled" },
   opencode: { permission: "deny" },
 };
+// A worker reads only its prompt. Claude would also load the user's CLAUDE.md files into every worker
+// session, which on a large personal CLAUDE.md costs more than the transcript the worker reads.
+const LOCKDOWN_ENV: Record<Provider, Record<string, string>> = { claude: { CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1" }, codex: {}, opencode: {} };
 const POLL_MS = 15_000;
 const PERMISSION_BACKOFF_MS = 2_000;
 const MAX_PERMISSION_WAITS = 10;
@@ -106,7 +109,7 @@ export async function runWorker(paseo: PaseoApi, root: string, job: WorkerJob, o
     handle = await paseo.workspaces.ref(workspaceId).agents.create({
       title: job.title,
       config: { provider: await resolveModel(paseo, job.provider, job.model), modeId: RESTRICTED_MODES[job.provider], options: LOCKDOWN_OPTIONS[job.provider], mcpServers: {} },
-      env: { [WORKER_ENV]: WORKER_ROLE },
+      env: { ...LOCKDOWN_ENV[job.provider], [WORKER_ENV]: WORKER_ROLE },
       prompt: job.prompt,
       ...(job.provider === "opencode" ? {} : { outputSchema: job.outputSchema }),
       background: !job.notify,

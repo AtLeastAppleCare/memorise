@@ -870,6 +870,29 @@ describe("hardening", () => {
     vi.useRealTimers();
   });
 
+  it("starts a Claude worker without the user's CLAUDE.md, strict to its own MCP servers (none)", async () => {
+    const root = tempDir("lean-");
+    let request: { config: { mcpServers: unknown; options: Record<string, unknown> }; env: Record<string, string> } | undefined;
+    const paseo = {
+      workspaces: {
+        list: async () => ({ entries: [{ id: "hidden-1", workspaceDirectory: workersDir(root) }], pageInfo: { hasMore: false } }),
+        ref: () => ({
+          agents: {
+            create: async (input: typeof request) => {
+              request = input;
+              return { id: "w1", workspaceId: "hidden-1", waitForFinish: async () => ({ status: "idle", final: null, error: null, lastMessage: "{}" }), archive: async () => ({}) };
+            },
+          },
+        }),
+      },
+      providers: { listModels: async () => ({ models: [{ id: "m", isDefault: true }] }) },
+    } as unknown as PaseoApi;
+    await runWorker(paseo, root, { provider: "claude", model: "", title: "t", prompt: "p", outputSchema: {}, timeoutMs: 60_000, notify: false }, () => undefined);
+    expect(request?.config.mcpServers).toEqual({});
+    expect(request?.config.options).toMatchObject({ extraArgs: { "strict-mcp-config": null } });
+    expect(request?.env).toEqual({ CLAUDE_CODE_DISABLE_CLAUDE_MDS: "1", [WORKER_ENV]: WORKER_ROLE });
+  });
+
   it("skips a torn usage line instead of failing every count", async () => {
     const root = tempDir("usage-");
     const usage = new UsageLog(root);
