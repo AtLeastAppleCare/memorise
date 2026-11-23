@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
-import { resolve } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import {
   allowedTypes,
@@ -106,6 +106,15 @@ export async function mergeAliasKeys(store: MemoryStore, proposals: ProposalStor
     }
   }
 }
+
+// Whether `cwd` is another plugin's helper folder, `<plugin-data>/<plugin>/workers`, where plugins such as
+// Contextualise run their summary helpers. Only `workers`: other plugin-data folders can hold M's own
+// chats (Morphise's Quick Chat). `<plugin-data>` is the folder that holds this plugin's data root.
+const inPluginWorkers = (root: string, cwd: string) => {
+  const pluginData = resolve(dirname(root));
+  const parts = relative(pluginData, resolve(cwd)).split(sep);
+  return basename(pluginData) === "plugin-data" && parts.length >= 2 && parts[0] !== ".." && !isAbsolute(parts[0]) && parts[1] === "workers";
+};
 
 export function contributeMemory(server: PluginServerContext, resolveRoot: () => Promise<string>) {
   const settings = server.registerSettings(memorySettings);
@@ -247,8 +256,9 @@ export function contributeMemory(server: PluginServerContext, resolveRoot: () =>
       if (!values.enabled) return { ...request, config: stripped };
       const { root, tokens, usage, capture, port, mcpProblem } = await runtime;
       capture.remember(paseo);
-      // The plugin's own capture and tidy workers get no memory and no memory tools.
-      if (isWorkerRequest(root, config.cwd, request.env)) return { ...request, config: stripped };
+      // The plugin's own capture and tidy workers get no memory and no memory tools, and nor do other
+      // plugins' helper workers: they answer from their prompt alone.
+      if (isWorkerRequest(root, config.cwd, request.env) || inPluginWorkers(root, config.cwd)) return { ...request, config: stripped };
       await projectRootsKnown(paseo);
       const prepared = await prepareMemory(config.cwd, values);
       if (prepared.off) return { ...request, config: stripped };

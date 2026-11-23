@@ -4,6 +4,13 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-23
+
+### Changed
+
+- Claude capture, tidy and project-file workers no longer load the user's CLAUDE.md files. They read only their prompt; a large personal CLAUDE.md made each worker cost more than the transcript it reads.
+- Other plugins' helper workers (`plugin-data/<plugin>/workers`, such as Contextualise's chat summaries) no longer get the memory index and tools.
+
 ## [0.14.3] - 2026-11-22
 
 ### Fixed

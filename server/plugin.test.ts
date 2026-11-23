@@ -240,6 +240,19 @@ describe("memorise server entry", () => {
     expect(fake.respondToPermission).toHaveBeenCalledWith({ requestId: "p1", response: { behavior: "deny", message: "Memory workers may not use tools." } });
   });
 
+  it("gives another plugin's helper workers no memory, but keeps it for M's chats elsewhere in plugin-data", async () => {
+    root = join(tempDir("plugin-home-"), "plugin-data", "memorise");
+    const fake = start();
+    const helper = (await fake.create({ provider: "claude", cwd: join(root, "..", "contextualise", "workers"), systemPrompt: "Summarise.", mcpServers: other })).config;
+    expect(helper.systemPrompt).toBe("Summarise.");
+    expect(Object.keys(helper.mcpServers)).toEqual(["excalidraw"]);
+    // Morphise's Quick Chat keeps M's own chats under plugin-data.
+    const quickChat = join(root, "..", "morphise", "quick-chat", "workspaces", "t-1");
+    await mkdir(quickChat, { recursive: true });
+    const chat = (await fake.create({ provider: "claude", cwd: quickChat, systemPrompt: "Own.", mcpServers: other })).config;
+    expect(chat.systemPrompt).toMatch(/^Own\.\n\n<memorise>/);
+  });
+
   it("pins only through the app, and pinned facts lead the index", async () => {
     const fake = start();
     const cwd = await repoWithOrigin("git@github.com:acme/api.git");
