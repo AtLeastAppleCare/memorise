@@ -4,6 +4,12 @@ All notable changes are recorded here. Versions follow [Semantic Versioning](htt
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-23
+
+### Documentation
+
+- The overview now says that a "saved without review" chat card keeps a read-only copy of the saved wording, which editing or deleting the memory in Memorise does not change; it follows Paseo's chat access and retention.
+
 ## [0.15.0] - 2026-11-23
 
 ### Changed
@@ -341,7 +347,9 @@ First release.
 - Install straight from Git: `paseo plugin add git:monarchmaisuriya/memorise`.
 - The Memorise icon.
 
-[Unreleased]: https://github.com/monarchmaisuriya/memorise/compare/v0.14.3...HEAD
+[Unreleased]: https://github.com/monarchmaisuriya/memorise/compare/v0.15.1...HEAD
+[0.15.1]: https://github.com/monarchmaisuriya/memorise/compare/v0.15.0...v0.15.1
+[0.15.0]: https://github.com/monarchmaisuriya/memorise/compare/v0.14.3...v0.15.0
 [0.14.3]: https://github.com/monarchmaisuriya/memorise/releases/tag/v0.14.3
 [0.9.1]: https://github.com/monarchmaisuriya/memorise/releases/tag/v0.9.1
 [0.9.0]: https://github.com/monarchmaisuriya/memorise/releases/tag/v0.9.0
